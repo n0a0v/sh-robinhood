@@ -1,0 +1,20 @@
+See LICENSE for copyright details.
+
+This implementation requires a C++17 compliant compiler and has been tested with:
+	* g++ 9
+	* g++ 10
+	* clang 10
+
+CMake & binaries are setup for unit testing. Only the headers in the "sh"
+directory are necessary to use the Robinhood hashtable. Simply move them as a
+group to a desired directory. Define NDEBUG during Release-type builds to
+disable many asserts and debug iterators.
+
+sh::openmap & sh::openset:
+	* The interfaces are largely compatible with std::unordered_map and
+	  std::unordered_set, respectively, but are not identical.
+	* There are additional causes of iterator invalidation!
+	* Also, the exception guarantees are somewhat weakened.
+	* More details are recorded in robinhood.hpp.
+
+I hope this is useful or at least interesting!

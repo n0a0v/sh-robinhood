@@ -1,9 +1,11 @@
 See LICENSE for copyright details.
 
-This implementation requires a C++17 compliant compiler and has been tested with:
-	* g++ 9
-	* g++ 10
-	* clang 10
+This implementation requires a mostly C++17 compliant compiler and has been
+tested with:
+	* g++ 11
+	* g++ 12
+	* clang 15
+	* MSVC 2022 (17.9.3)
 
 CMake & binaries are setup for unit testing. Only the headers in the "sh"
 directory are necessary to use the Robinhood hashtable. Simply move them as a

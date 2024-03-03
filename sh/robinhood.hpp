@@ -1,6 +1,6 @@
 /*	BSD 3-Clause License
 
-	Copyright (c) 2022, Paul Varga
+	Copyright (c) 2022-2024, Paul Varga
 	All rights reserved.
 
 	Redistribution and use in source and binary forms, with or without
@@ -112,9 +112,9 @@
  *		a rehash/resize.
  *
  *	Hence, there are more operations that can invalidate iterators than most
- *	similar containers. Users may define SH_ROBINHOOD_DEBUG_ITERATOR to
- *	enable runtime checking of iterators (enabled by default if NDEBUG is not
- *	defined).
+ *	similar containers. Users may define SH_ROBINHOOD_DEBUG_ITERATOR as 1
+ *	(non-zero) to enable runtime checking of iterators (enabled by default if
+ *	NDEBUG is not defined).
  *
  *	Benchmarks:
  *	* Map types denoted as key => value.
@@ -326,17 +326,39 @@
 #include <type_traits>
 #include <utility>
 
-/**	Transparently wraps assert to allow asserts to be turned off for the sh Robinhood-style hashtables in one location, if too costly.
- */
-#define SH_ROBINHOOD_ASSERT assert
+#if !defined(SH_ROBINHOOD_RESTRICT)
+	#if defined(__GNUC__) || defined(__llvm__)
+		#define SH_ROBINHOOD_RESTRICT __restrict__
+	#elif defined(_MSC_VER)
+		#define SH_ROBINHOOD_RESTRICT __restrict
+	#else // !__GNUC__ && !__llvm__ && !_MSC_VER
+		#define SH_ROBINHOOD_RESTRICT
+	#endif // !__GNUC__ && !__llvm__ && !_MSC_VER
+#endif
 
-#ifndef NDEBUG
-	/**	If defined, sh Robinhood-style hashtable iterators will capture extra information at construction time that will be checked via SH_ROBINHOOD_ASSERT for validity. Operations (see list above) that invalidate iterators will fail the assertation.
+#if !defined(SH_ROBINHOOD_ASSERT)
+	/**	Transparently wraps assert to allow asserts to be turned off for the sh Robinhood-style hashtables in one location, if too costly.
 	 */
-	#define SH_ROBINHOOD_DEBUG_ITERATOR
-#endif // !NDEBUG
+	#define SH_ROBINHOOD_ASSERT(CONDITION, ...) \
+		/* Comment: __VA_ARGS__ */ \
+		assert(CONDITION)
+#endif // !SH_ROBINHOOD_ASSERT
+
+#if !defined(SH_ROBINHOOD_DEBUG_ITERATOR) && !defined(NDEBUG)
+	/**	If defined as non-zero, sh Robinhood-style hashtable iterators will capture extra information at construction time that will be checked (via SH_ROBINHOOD_ASSERT) for validity. Operations (see list above) that invalidate iterators will fail the assertation.
+	 */
+	#define SH_ROBINHOOD_DEBUG_ITERATOR 1
+#endif // !SH_ROBINHOOD_DEBUG_ITERATOR && !NDEBUG
 
 // Macros for branch prediction suggestion:
+#if defined(__has_cpp_attribute)
+	#if __has_cpp_attribute(likely)
+		#define SH_ROBINHOOD_LIKELY(EXPRESSION) (EXPRESSION) [[likely]]
+	#endif // __has_cpp_attribute(likely)
+	#if __has_cpp_attribute(unlikely)
+		#define SH_ROBINHOOD_UNLIKELY(EXPRESSION) (EXPRESSION) [[unlikely]]
+	#endif // __has_cpp_attribute(unlikely)
+#endif // __has_cpp_attribute
 #if defined(__has_builtin)
 	#if __has_builtin(__builtin_expect)
 		#define SH_ROBINHOOD_EXPECT(EXPRESSION, CONSTANT) (__builtin_expect((EXPRESSION), (CONSTANT)))
@@ -344,15 +366,21 @@
 #elif defined(__GNUC__) && !defined(__llvm__) && __GNUC__ >= 3
 	// Older versions of GCC support __builtin_expect, but don't provide __has_builtin.
 	#define SH_ROBINHOOD_EXPECT(EXPRESSION, CONSTANT) (__builtin_expect((EXPRESSION), (CONSTANT)))
-#endif
-#ifdef SH_ROBINHOOD_EXPECT
-	#define SH_ROBINHOOD_LIKELY(EXPRESSION) SH_ROBINHOOD_EXPECT(!!(EXPRESSION), 1)
-	#define SH_ROBINHOOD_UNLIKELY(EXPRESSION) SH_ROBINHOOD_EXPECT(!!(EXPRESSION), 0)
-#else
-	#define SH_ROBINHOOD_EXPECT(EXPRESSION, CONSTANT) (EXPRESSION)
-	#define SH_ROBINHOOD_LIKELY(EXPRESSION) (EXPRESSION)
-	#define SH_ROBINHOOD_UNLIKELY(EXPRESSION) (EXPRESSION)
-#endif
+#endif // __GNUC__ && !__llvm__ && __GNUC__ >= 3
+#if !defined(SH_ROBINHOOD_LIKELY)
+	#if defined(SH_ROBINHOOD_EXPECT)
+		#define SH_ROBINHOOD_LIKELY(EXPRESSION) SH_ROBINHOOD_EXPECT(!!(EXPRESSION), 1)
+	#else // !SH_ROBINHOOD_EXPECT
+		#define SH_ROBINHOOD_LIKELY(EXPRESSION) (EXPRESSION)
+	#endif // !SH_ROBINHOOD_EXPECT
+#endif // !SH_ROBINHOOD_LIKELY
+#if !defined(SH_ROBINHOOD_UNLIKELY)
+	#if defined(SH_ROBINHOOD_EXPECT)
+		#define SH_ROBINHOOD_UNLIKELY(EXPRESSION) SH_ROBINHOOD_EXPECT(!!(EXPRESSION), 0)
+	#else // !SH_ROBINHOOD_EXPECT
+		#define SH_ROBINHOOD_UNLIKELY(EXPRESSION) (EXPRESSION)
+	#endif // !SH_ROBINHOOD_EXPECT
+#endif // !SH_ROBINHOOD_UNLIKELY
 
 // Macros for compiler warnings:
 #if defined(__GNUC__) && (!defined(__llvm__) || __clang_major__ >= 14)
@@ -363,9 +391,9 @@
 			SH_ROBINHOOD_WARN_APPEND(SH_WARN_, __LINE__)() __attribute__((warning(WHAT))) \
 			{} \
 		} SH_ROBINHOOD_WARN_APPEND(sh_warn_, __COUNTER__)
-#else
+#else // !__GNUC__ || (__llvm__ && __clang_major__ < 14)
 	#define SH_ROBINHOOD_WARN(WHAT) /* warning: WHAT */
-#endif
+#endif // !__GNUC__ || (__llvm__ && __clang_major__ < 14)
 
 /**	A Robinhood-style hashtable implementation.
  */
@@ -377,24 +405,31 @@ namespace sh::robinhood
 	using default_size_type = std::uint32_t;
 
 	/**	Specializable template for robinhood hashtable keys to indicate if it's beneficial to cache the hash value.
-	 *	@details Should be specialized to true for types that are expensive to hash and perhaps for tables where
-	 *	find performance is a high priority and misses are expected to be very frequent.
+	 *	@details Defaults to true for values that are large enough where the caches missed caused by checking the key are worth the
+	 *	extra space in the Robinhood info data. This should be specialized to true for types that are expensive to hash and perhaps
+	 *	for tables where find performance is a high priority and misses are expected to be very frequent.
 	 *	@tparam Key A type of key used in a hashtable.
+	 *	@tparam KeyValueSize The size of the key and, if stored inside a pair, any value.
 	 */
-	template <typename Key>
-	struct cache_hash final : std::false_type { };
+	template <typename Key, std::size_t KeyValueSize>
+	struct cache_hash final
+		: std::conditional_t<KeyValueSize >= (sizeof(void*) * 8),
+			std::true_type,
+			std::false_type>
+	{ };
 
 	/**	Helper to briefly access value of cache_hash::value.
 	 *	@tparam Key A type of key used in a hashtable.
+	 *	@tparam KeyValueSize The size of the key and, if stored inside a pair, any value.
 	 */
-	template <typename Key>
-	constexpr bool cache_hash_v = cache_hash<Key>::value;
+	template <typename Key, std::size_t KeyValueSize>
+	constexpr bool cache_hash_v = cache_hash<Key, KeyValueSize>::value;
 
 	/**	Specialized template to indicate std::basic_string (et al) should have their hash values cached.
-	 *	@param This has proven to be nearly always a performance benefit for these types.
+	 *	@details This has proven to be nearly always a performance benefit for std::string keys.
 	 */
-	template <typename CharT, typename Traits, typename Allocator>
-	struct cache_hash<std::basic_string<CharT, Traits, Allocator>> final : std::true_type { };
+	template <typename CharT, typename Traits, typename Allocator, std::size_t KeyValueSize>
+	struct cache_hash<std::basic_string<CharT, Traits, Allocator>, KeyValueSize> final : std::true_type { };
 
 	/**	Used to determine if a given type is marked is_transparent.
 	 *	@details Used on the hasher and key_equal types to determine if they should accept arbitrary Key types.
@@ -491,26 +526,86 @@ namespace sh::robinhood
 		return T(std::ceil(value));
 	}
 
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
 	/**	Debug information to be captured in an iterator.
+	 *	@details Stores the associated buckets as a pointer so that iterators may check their validity against it.
 	 *	@tparam SizeType The size_type of the hashtable buckets.
 	 */
-	template <typename SizeType>
-	struct iterator_debug final
+	template <typename BucketsType>
+	struct iterator_validator final
 	{
-		using size_type = SizeType;
+		using buckets_type = BucketsType;
+		using size_type = typename buckets_type::size_type;
+		using generation_type = size_type;
+
+		/**	Construct for the given buckets.
+		 *	@param buckets The associated buckets that will be stored as a pointer.
+		 */
+		explicit iterator_validator(const buckets_type& buckets) noexcept
+			: m_buckets{ &buckets }
+			, m_generation{ initialize_generation() }
+		{ }
+
+		/**	Update the associated buckets.
+		 *	@param buckets The associated buckets that will be stored as a pointer.
+		 */
+		void set_buckets(const buckets_type& buckets) noexcept
+		{
+			m_buckets = &buckets;
+		}
+
+		/**	Return the iterator generation.
+		 *	@return The current generation of the table buckets.
+		 */
+		constexpr generation_type get_generation() const noexcept
+		{
+			return m_generation;
+		}
+
+		/**	Invalidate the current the debug iterator generation.
+		 *	@details Not required to always increment by one.
+		 */
+		void invalidate() noexcept
+		{
+			// Could increment by a non-one value to prevent intersection.
+			++m_generation;
+		}
+
+		/**	Check the validity of a given information describing an iterator.
+		 *	@param index The index of the iterator.
+		 *	@param capacity The capacity of the iterator.
+		 *	@param generation The generation of the iterator.
+		 *	@return True if the given iterator information is considered valid for use (e.g., passing to the table or dereferencing).
+		 */
+		constexpr bool validate(const size_type index, const size_type capacity, const generation_type generation) const noexcept
+		{
+			return capacity == m_buckets->get_capacity()
+				// end() is given a pass on matching m_generation (as long as capacity matched above).
+				&& (index == m_buckets->get_capacity() || generation == m_generation);
+		}
+
+	private:
+		/**	Return an initial value for a debug iterator generation.
+		 *	@details Not required to always return the same value.
+		 *	@return An initial value for a debug iterator generation.
+		 */
+		constexpr static generation_type initialize_generation() noexcept
+		{
+			// Could use a pseudo-random number to initialize.
+			return 0;
+		}
+
+		/**	A pointer to the owning buckets.
+		 *	@details This must be updated (via set_buckets) any time this validator is re-owned.
+		 */
+		const buckets_type* m_buckets;
 
 		/**	The debug generation at the time of iterator construction.
 		 *	@details Each iterator-invalidating modification of the table buckets will cause this value to fail to match the new value.
 		 */
-		size_type m_generation = 0;
-
-		/**	The bucket capacity at the time of iterator construction.
-		 *	@details Any time the bucket capacity is altered can signal that an iterator is invalid.
-		 */
-		size_type m_capacity = 0;
+		generation_type m_generation;
 	};
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 
 	/**	Simple Robinhood hashtable information element containing a distance value.
 	 *	@note A distance value of zero indicates empty (see empty_distance_v above).
@@ -535,14 +630,14 @@ namespace sh::robinhood
 		 *	@param distance The distance value with which to initialize.
 		 */
 		constexpr explicit info(const distance_type distance) noexcept
-			: m_distance(distance)
+			: m_distance{ distance }
 		{ }
 		/**	Constructor for a given distance & ignored cached hash value.
 		 *	@param distance The distance value with which to initialize.
 		 *	@param cached_hash A cached hash value to ignore.
 		 */
 		constexpr info(const distance_type distance, const std::size_t cached_hash) noexcept
-			: m_distance(distance)
+			: m_distance{ distance }
 		{ }
 
 		/**	Copy constructor from a Robinhood info of a different DistanceType.
@@ -550,7 +645,7 @@ namespace sh::robinhood
 		 */
 		template <typename OtherDistanceType>
 		constexpr info(const info<OtherDistanceType>& other) noexcept
-			: m_distance(other.get_distance())
+			: m_distance{ distance_type(other.get_distance()) }
 		{ }
 		/**	Copy assignment operator from a Robinhood info of a different DistanceType.
 		 *	@note Does not check for narrowing conversion of the distance value.
@@ -615,8 +710,8 @@ namespace sh::robinhood
 		 */
 		constexpr info move_back() const noexcept
 		{
-			SH_ROBINHOOD_ASSERT(m_distance > 1);
-			return info(m_distance - 1);
+			SH_ROBINHOOD_ASSERT(m_distance > 1, "robinhood::info::m_distance of 1 is already moved back as far as possible or is empty.");
+			return info{ distance_type(m_distance - 1) };
 		}
 		/**	Return true if this Robinhood info's cached hash matches the given info's
 		 *	@param other Another Robinhood info.
@@ -661,8 +756,8 @@ namespace sh::robinhood
 		 *	@param cached_hash A cached hash value with which to initialize.
 		 */
 		constexpr cached_hash_info(const distance_type distance, const std::size_t cached_hash) noexcept
-			: m_distance(distance)
-			, m_cached_hash(cached_hash)
+			: m_distance{ distance }
+			, m_cached_hash{ cached_hash_type(cached_hash) }
 		{ }
 
 		/**	Copy constructor from a Robinhood cached hash info of a different DistanceType.
@@ -670,8 +765,8 @@ namespace sh::robinhood
 		 */
 		template <typename OtherDistanceType>
 		constexpr cached_hash_info(const cached_hash_info<OtherDistanceType, CachedHashType>& other) noexcept
-			: m_distance(other.get_distance())
-			, m_cached_hash(other.get_cached_hash())
+			: m_distance{ distance_type(other.get_distance()) }
+			, m_cached_hash{ other.get_cached_hash() }
 		{ }
 		/**	Copy assignment operator from a Robinhood cached hash info of a different DistanceType.
 		 *	@note Does not check for narrowing conversion of the distance value.
@@ -746,8 +841,8 @@ namespace sh::robinhood
 		 */
 		constexpr cached_hash_info move_back() const noexcept
 		{
-			SH_ROBINHOOD_ASSERT(m_distance > 1);
-			return cached_hash_info(m_distance - 1, m_cached_hash);
+			SH_ROBINHOOD_ASSERT(m_distance > 1, "robinhood::cached_hash_info::m_distance of 1 is already moved back as far as possible or is empty.");
+			return cached_hash_info{ distance_type(m_distance - 1), m_cached_hash };
 		}
 
 		/**	Return true if this Robinhood info's cached hash matches the given info's
@@ -810,7 +905,7 @@ namespace sh::robinhood
 		/**	True if the hash value should be cached in Robinhood info elements.
 		 *	@note Specialize cache_hash to easily override this value.
 		 */
-		constexpr static bool cached_hash = robinhood::cache_hash_v<key_type>;
+		constexpr static bool cached_hash = robinhood::cache_hash_v<key_type, sizeof(mutable_value_type)>;
 
 		/**	True if there is only one width for Robinhood info elements.
 		 *	@details This was chosen via experimentation on x86-64 and better
@@ -920,7 +1015,7 @@ namespace sh::robinhood
 	{
 	public:
 		constexpr explicit buckets_info(const bool wide) noexcept
-			: m_wide(wide)
+			: m_wide{ wide }
 		{ }
 		buckets_info(const buckets_info&) noexcept = default;
 		buckets_info(buckets_info&&) noexcept = default;
@@ -940,8 +1035,7 @@ namespace sh::robinhood
 		 */
 		constexpr void swap(buckets_info& other) noexcept
 		{
-			using std::swap;
-			swap(m_wide, other.m_wide);
+			std::swap(m_wide, other.m_wide);
 		}
 		/**	Swap two buckets info.
 		 *	@param lhs An info to swap values with rhs.
@@ -950,6 +1044,14 @@ namespace sh::robinhood
 		friend void swap(buckets_info& lhs, buckets_info& rhs) noexcept
 		{
 			lhs.swap(rhs);
+		}
+
+		/**	Returns false to indicate narrow Robinhood info, true for wide.
+		 *	@return False to indicate narrow Robinhood info, true for wide.
+		 */
+		constexpr bool get_wide() const noexcept
+		{
+			return m_wide;
 		}
 
 	protected:
@@ -986,6 +1088,14 @@ namespace sh::robinhood
 		friend void swap(buckets_info& lhs, buckets_info& rhs) noexcept
 		{
 			lhs.swap(rhs);
+		}
+
+		/**	Returns false to indicate narrow Robinhood info, as this is a constant_width.
+		 *	@return False to indicate narrow Robinhood info, as this is a constant_width.
+		 */
+		static constexpr bool get_wide() noexcept
+		{
+			return false;
 		}
 	};
 
@@ -1026,29 +1136,23 @@ namespace sh::robinhood
 		/**	Minimal constructor for zero capacity.
 		 */
 		constexpr explicit buckets(const allocator_type& alloc) noexcept
-			: buckets_info_type(/* wide: */ false)
-			, allocator_type(alloc)
-			, m_info(&empty_info<narrow_info_type>())
-			, m_data(nullptr)
-			, m_capacity(0)
-			, m_count(0)
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			, m_generation(initialize_generation())
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+			: buckets_info_type{ /* wide: */ false }
+			, allocator_type{ alloc }
+			, m_info{ &empty_info<narrow_info_type>() }
+			, m_data{ nullptr }
+			, m_capacity{ 0 }
+			, m_count{ 0 }
 		{ }
 		/**	Constructor for a given capacity and narrow width.
 		 *	@param capacity The capacity of values.
 		 */
 		constexpr explicit buckets(const size_type capacity, const allocator_type& alloc)
-			: buckets_info_type(/* wide: */ false)
-			, allocator_type(alloc)
-			, m_info(&empty_info<narrow_info_type>())
-			, m_data(nullptr)
-			, m_capacity(capacity)
-			, m_count(0)
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			, m_generation(initialize_generation())
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+			: buckets_info_type{ /* wide: */ false }
+			, allocator_type{ alloc }
+			, m_info{ &empty_info<narrow_info_type>() }
+			, m_data{ nullptr }
+			, m_capacity{ capacity }
+			, m_count{ 0 }
 		{
 			// When m_capacity is zero, m_info should be empty_info<info_type> and m_data, nullptr.
 			if (m_capacity > 0)
@@ -1064,34 +1168,31 @@ namespace sh::robinhood
 		 *	@param wide False for narrow info, true for wide.
 		 */
 		constexpr buckets(const size_type capacity, const bool wide, const allocator_type& alloc)
-			: buckets_info_type(wide)
-			, allocator_type(alloc)
-			, m_info(nullptr)
-			, m_data(nullptr)
-			, m_capacity(capacity)
-			, m_count(0)
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			, m_generation(initialize_generation())
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+			: buckets_info_type{ wide }
+			, allocator_type{ alloc }
+			, m_info{ nullptr }
+			, m_data{ nullptr }
+			, m_capacity{ capacity }
+			, m_count{ 0 }
 		{
 			// When m_capacity is zero, m_info should be empty_info<info_type> and m_data, nullptr.
 			if (m_capacity > 0)
 			{
-				with_info([this](const auto* const info)
+				with_info([this](const auto* const SH_ROBINHOOD_RESTRICT null_info)
 				{
-					using info_type = std::decay_t<decltype(*info)>;
-					auto info_alloc = get_info_allocator<info_type>();
-					m_info = rebind_traits<info_type>::allocate(info_alloc, m_capacity + info_tail);
-					clear_info(static_cast<info_type*>(m_info), m_capacity + info_tail);
+					using info_type = std::decay_t<decltype(*null_info)>;
+					auto info_alloc = this->get_info_allocator<info_type>();
+					m_info = rebind_traits<info_type>::allocate(info_alloc, this->m_capacity + info_tail);
+					this->clear_info(static_cast<info_type*>(this->m_info), this->m_capacity + info_tail);
 				});
 				m_data = rebind_traits<value_type>::allocate(get_allocator(), m_capacity);
 			}
 			else
 			{
-				with_info([this](const auto* const info) noexcept
+				with_info([this](const auto* const SH_ROBINHOOD_RESTRICT null_info) noexcept
 				{
-					using info_type = std::decay_t<decltype(*info)>;
-					m_info = &empty_info<info_type>();
+					using info_type = std::decay_t<decltype(*null_info)>;
+					this->m_info = &empty_info<info_type>();
 				});
 			}
 		}
@@ -1100,15 +1201,12 @@ namespace sh::robinhood
 		 *	@param alloc The allocator to assume for this buckets.
 		 */
 		buckets(const buckets& other, const allocator_type& alloc)
-			: buckets_info_type(static_cast<const buckets_info_type&>(other))
-			, allocator_type(alloc)
-			, m_info(other.m_info)
-			, m_data(nullptr)
-			, m_capacity(other.m_capacity)
-			, m_count(other.m_count)
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			, m_generation(initialize_generation())
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+			: buckets_info_type{ other.get_buckets_info() }
+			, allocator_type{ alloc }
+			, m_info{ other.m_info }
+			, m_data{ nullptr }
+			, m_capacity{ other.m_capacity }
+			, m_count{ other.m_count }
 		{
 			// When m_capacity is zero, m_info should be empty_info<info_type> and m_data, nullptr.
 			if (m_capacity > 0)
@@ -1122,57 +1220,57 @@ namespace sh::robinhood
 		 *	@param alloc The allocator to assume for this buckets.
 		 */
 		buckets(const buckets& other)
-			: buckets(other, rebind_traits<value_type>::select_on_container_copy_construction(other.get_allocator()))
+			: buckets{ other, rebind_traits<value_type>::select_on_container_copy_construction(other.get_allocator()) }
 		{ }
 		/**	Move constructor from another buckets with an is_always_equal specified allocator.
 		 *	@param other The other buckets to move into this one.
 		 *	@param alloc The allocator to assume for this buckets.
 		 */
 		buckets(buckets&& other, const allocator_type& alloc, std::true_type) noexcept
-			: buckets_info_type(std::exchange(static_cast<buckets_info_type&>(other), buckets_info_type(false)))
-			, allocator_type(std::move(other.get_allocator()))
-			, m_info(std::exchange(other.m_info, &empty_info<narrow_info_type>()))
-			, m_data(std::exchange(other.m_data, nullptr))
-			, m_capacity(std::exchange(other.m_capacity, 0))
-			, m_count(std::exchange(other.m_count, 0))
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			, m_generation(initialize_generation())
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+			: buckets_info_type{ std::exchange(other.get_buckets_info(), buckets_info_type{ /* wide: */ false }) }
+			, allocator_type{ std::move(other.get_allocator()) }
+			, m_info{ std::exchange(other.m_info, &empty_info<narrow_info_type>()) }
+			, m_data{ std::exchange(other.m_data, nullptr) }
+			, m_capacity{ std::exchange(other.m_capacity, 0) }
+			, m_count{ std::exchange(other.m_count, 0) }
 		{
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			// Always invalidate source iterators on move construction.
-			other.invalidate_iterators();
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			move_iterator_validator(other);
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 		}
 		/**	Move constructor from another buckets with a possibly non-is_always_equal specified allocator.
 		 *	@param other The other buckets to move into this one.
 		 *	@param alloc The allocator to assume for this buckets.
 		 */
 		buckets(buckets&& other, const allocator_type& alloc, std::false_type)
-			: buckets_info_type(static_cast<const buckets_info_type&>(other))
-			, allocator_type(alloc)
-			, m_info(other.m_info)
-			, m_data(nullptr)
-			, m_capacity(other.m_capacity)
-			, m_count(other.m_count)
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			, m_generation(initialize_generation())
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+			: buckets_info_type{ other.get_buckets_info() }
+			, allocator_type{ alloc }
+			, m_info{ other.m_info }
+			, m_data{ nullptr }
+			, m_capacity{ other.m_capacity }
+			, m_count{ other.m_count }
 		{
 			if (alloc == other.get_allocator())
 			{
 				// Allocators are infact compatible and an exchange will suffice.
-				other.buckets_info_type::operator=(buckets_info_type(false));
+				other.buckets_info_type::operator=(buckets_info_type{ /* wide: */ false });
 				m_info = std::exchange(other.m_info, &empty_info<narrow_info_type>());
 				m_data = std::exchange(other.m_data, nullptr);
 				other.m_capacity = 0;
 				other.m_count = 0;
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+				move_iterator_validator(other);
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			}
 			else if (m_capacity > 0)
 			{
 				// Allocators are incompatible, construct new space and move the values.
 				allocate_and_initialize_one_or_more_values_by_move(other);
 				// Capacity and count were already copied prior to allocate_and_initialize_one_or_more_values_by_move.
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+				// Invalidate source iterators on move construction with incompatible allocators.
+				other.invalidate_iterators();
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			}
 			/*
 			else
@@ -1180,10 +1278,6 @@ namespace sh::robinhood
 				// Capacity is zero, m_info should remain empty_info<info_type> and m_data, nullptr.
 			}
 			*/
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			// Always invalidate source iterators on move construction.
-			other.invalidate_iterators();
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
 		}
 		/**	Move constructor from another buckets with specified allocator.
 		 *	@param other The other buckets to move into this one.
@@ -1191,15 +1285,14 @@ namespace sh::robinhood
 		 */
 		buckets(buckets&& other, const allocator_type& alloc)
 			noexcept(typename allocator_traits::is_always_equal())
-			: buckets(std::move(other), alloc, std::bool_constant<(typename allocator_traits::is_always_equal())>{})
+			: buckets{ std::move(other), alloc, std::bool_constant<(typename allocator_traits::is_always_equal())>{} }
 		{ }
-		/**	Move constructor from another buckets.
-		 *	@note Uses select_on_container_copy_construction to copy allocator from other.
+		/**	Move constructor & allocator from another buckets.
 		 *	@param other The other buckets to move into this one.
 		 */
 		constexpr buckets(buckets&& other)
 			noexcept(typename allocator_traits::is_always_equal())
-			: buckets(std::move(other), rebind_traits<value_type>::select_on_container_copy_construction(other.get_allocator()))
+			: buckets{ std::move(other), std::move(other) }
 		{ }
 
 		/**	Destructor.
@@ -1219,14 +1312,13 @@ namespace sh::robinhood
 		{
 			const auto do_swap = [this](buckets& other) noexcept
 			{
-				using std::swap;
 				// Swap width.
-				this->buckets_info_type::swap(static_cast<buckets_info_type&>(other));
+				this->buckets_info_type::swap(other.get_buckets_info());
 				// Swap other data members.
-				swap(m_info, other.m_info);
-				swap(m_data, other.m_data);
-				swap(m_capacity, other.m_capacity);
-				swap(m_count, other.m_count);
+				std::swap(m_info, other.m_info);
+				std::swap(m_data, other.m_data);
+				std::swap(m_capacity, other.m_capacity);
+				std::swap(m_count, other.m_count);
 			};
 			// Do a resize if necessary and copy data without needing to propagate the allocators.
 			const auto do_resize_if_necessary_and_copy = [&](const buckets& other)
@@ -1258,16 +1350,16 @@ namespace sh::robinhood
 			else
 			{
 				// Copy into temporary using other allocator. Will allocate (could throw) and afterwards copy values.
-				buckets new_buckets(other);
+				buckets new_buckets{ other };
 				// Swap, leaving new_buckets to destruct our previous values.
 				using std::swap;
 				swap(get_allocator(), new_buckets.get_allocator());
 				do_swap(new_buckets);
 			}
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			// Always invalidate destination iterators on copy assignment.
 			invalidate_iterators();
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			return *this;
 		}
 
@@ -1279,27 +1371,31 @@ namespace sh::robinhood
 		buckets& operator=(buckets&& other)
 			noexcept(typename allocator_traits::is_always_equal())
 		{
+			SH_ROBINHOOD_ASSERT(this != &other,
+				"Assumption that robinhood::buckets::operator=(buckets&&) takes non-this buckets.");
 			const auto do_exchange = [this](buckets& other) noexcept
 			{
 				// Exchange wide.
 				constexpr bool wide = false;
-				this->buckets_info_type::operator=(std::exchange(static_cast<buckets_info_type&>(other), buckets_info_type(wide)));
+				this->buckets_info_type::operator=(std::exchange(other.get_buckets_info(), buckets_info_type{ wide }));
 				// Exchange other data members.
 				m_info = std::exchange(other.m_info, &empty_info<narrow_info_type>());
 				m_data = std::exchange(other.m_data, nullptr);
 				m_capacity = std::exchange(other.m_capacity, 0);
 				m_count = std::exchange(other.m_count, 0);
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+				move_iterator_validator(other);
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			};
 			const auto do_swap = [this](buckets& other) noexcept
 			{
-				using std::swap;
 				// Swap wide.
-				this->buckets_info_type::swap(static_cast<buckets_info_type&>(other));
+				this->buckets_info_type::swap(other.get_buckets_info());
 				// Swap other data members.
-				swap(m_info, other.m_info);
-				swap(m_data, other.m_data);
-				swap(m_capacity, other.m_capacity);
-				swap(m_count, other.m_count);
+				std::swap(m_info, other.m_info);
+				std::swap(m_data, other.m_data);
+				std::swap(m_capacity, other.m_capacity);
+				std::swap(m_count, other.m_count);
 			};
 			if constexpr (typename allocator_traits::is_always_equal())
 			{
@@ -1311,34 +1407,37 @@ namespace sh::robinhood
 				destruct_and_deallocate_values_and_info();
 				do_exchange(other);
 			}
-			else if (typename allocator_traits::propagate_on_container_move_assignment())
-			{
-				// Move into temporary using other allocator. Will allocate (could throw) and afterwards move_if_noexcept values.
-				buckets new_buckets(std::move(other));
-				// Swap, leaving new_buckets to destruct our previous values.
-				using std::swap;
-				swap(get_allocator(), new_buckets.get_allocator());
-				do_swap(new_buckets);
-			}
-			else if (m_capacity != other.m_capacity || get_wide() != other.get_wide())
-			{
-				// Move into temporary using this allocator. Will allocate (could throw) and afterwards move_if_noexcept values.
-				buckets new_buckets(std::move(other), get_allocator());
-				// Swap, leaving new_buckets to destruct our previous values.
-				do_swap(new_buckets);
-			}
 			else
 			{
-				// Capacity & width are equal & there's no desire to propagate allocator. Move values in-place.
-				move_replace_values_from_same_sized_buckets(other);
-				// Finally, copy the value of m_count.
-				m_count = other.m_count;
+				if (typename allocator_traits::propagate_on_container_move_assignment())
+				{
+					// Move into temporary using other allocator. Will allocate (could throw) and afterwards move_if_noexcept values.
+					buckets new_buckets{ std::move(other) };
+					// Swap, leaving new_buckets to destruct our previous values.
+					using std::swap;
+					swap(get_allocator(), new_buckets.get_allocator());
+					do_swap(new_buckets);
+				}
+				else if (m_capacity != other.m_capacity || get_wide() != other.get_wide())
+				{
+					// Move into temporary using this allocator. Will allocate (could throw) and afterwards move_if_noexcept values.
+					buckets new_buckets{ std::move(other), get_allocator() };
+					// Swap, leaving new_buckets to destruct our previous values.
+					do_swap(new_buckets);
+				}
+				else
+				{
+					// Capacity & width are equal & there's no desire to propagate allocator. Move values in-place.
+					move_replace_values_from_same_sized_buckets(other);
+					// Finally, copy the value of m_count.
+					m_count = other.m_count;
+				}
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+				// Invalidate source & destination iterators on move assignment with incompatible allocator.
+				invalidate_iterators();
+				other.invalidate_iterators();
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			}
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			// Always invalidate source & destination iterators on move assignment.
-			invalidate_iterators();
-			other.invalidate_iterators();
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
 			return *this;
 		}
 
@@ -1350,70 +1449,67 @@ namespace sh::robinhood
 				&& std::is_nothrow_swappable_v<allocator_type>
 				&& typename allocator_traits::is_always_equal())
 		{
-			const auto do_swap = [this](buckets& lhs, buckets& rhs) noexcept
+			const auto do_swap = [](buckets& lhs, buckets& rhs) noexcept
 			{
-				using std::swap;
 				// Swap width.
-				lhs.buckets_info_type::swap(static_cast<buckets_info_type&>(rhs));
+				lhs.buckets_info_type::swap(rhs.get_buckets_info());
 				// Swap other data members.
-				swap(lhs.m_info, rhs.m_info);
-				swap(lhs.m_data, rhs.m_data);
-				swap(lhs.m_capacity, rhs.m_capacity);
-				swap(lhs.m_count, rhs.m_count);
+				std::swap(lhs.m_info, rhs.m_info);
+				std::swap(lhs.m_data, rhs.m_data);
+				std::swap(lhs.m_capacity, rhs.m_capacity);
+				std::swap(lhs.m_count, rhs.m_count);
 			};
 			if constexpr (typename allocator_traits::is_always_equal())
 			{
 				do_swap(*this, other);
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-				// Swap iterator generation for stateless allocators.
-				using std::swap;
-				swap(m_generation, other.m_generation);
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+				// Swap iterator validation for stateless allocators.
+				swap_iterator_validator(other);
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			}
 			else if (this->allocator_type::operator==(static_cast<const allocator_type&>(other)))
 			{
 				do_swap(*this, other);
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-				// Swap iterator generation for equivalent allocators.
-				using std::swap;
-				swap(m_generation, other.m_generation);
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+				// Swap iterator validation for equivalent allocators.
+				swap_iterator_validator(other);
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			}
 			else if (typename allocator_traits::propagate_on_container_swap())
 			{
 				using std::swap;
 				swap(get_allocator(), other.get_allocator());
 				do_swap(*this, other);
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-				// Swap iterator generation for swap-propagated allocators.
-				swap(m_generation, other.m_generation);
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+				// Swap iterator validation for swap-propagated allocators.
+				swap_iterator_validator(other);
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			}
 			else if constexpr (is_trivial_v<value_type>)
 			{
 				// If trivial copying is accessible or we cannot rely on move_if_noexcept to be noexcept, perform a full copy:
-				buckets these_buckets_other_allocator(*this, other.get_allocator());
-				buckets other_buckets_this_allocator(other, get_allocator());
+				buckets these_buckets_other_allocator{ *this, other.get_allocator() };
+				buckets other_buckets_this_allocator{ other, get_allocator() };
 
 				// Swap into place, leaving temporaries to destruct:
 				do_swap(other, these_buckets_other_allocator);
 				do_swap(*this, other_buckets_this_allocator);
 
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
 				// Invalidate source & destination iterators on swap with stateful, non-equivalent, and non-swap-propagated allocators.
 				invalidate_iterators();
 				other.invalidate_iterators();
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			}
 			else
 			{
 				// Otherwise try to move the values into the temporaries. Perform allocation first as could throw:
-				buckets these_buckets_other_allocator(m_capacity, get_wide(), other.get_allocator());
-				buckets other_buckets_this_allocator(other.m_capacity, other.get_wide(), get_allocator());
+				buckets these_buckets_other_allocator{ m_capacity, get_wide(), other.get_allocator() };
+				buckets other_buckets_this_allocator{ other.m_capacity, other.get_wide(), get_allocator() };
 				// Move-initialize values:
 				if (m_count > 0)
 				{
-					with_info([this, &these_buckets_other_allocator](const auto* const info) noexcept
+					with_info([this, &these_buckets_other_allocator](const auto* const SH_ROBINHOOD_RESTRICT info) noexcept
 					{
 						these_buckets_other_allocator.initialize_values_by_move(*this, info);
 					});
@@ -1421,7 +1517,7 @@ namespace sh::robinhood
 				}
 				if (other_buckets_this_allocator.m_count > 0)
 				{
-					other.with_info([&other, &other_buckets_this_allocator](const auto* const other_info) noexcept
+					other.with_info([&other, &other_buckets_this_allocator](const auto* const SH_ROBINHOOD_RESTRICT other_info) noexcept
 					{
 						other_buckets_this_allocator.initialize_values_by_move(other, other_info);
 					});
@@ -1431,11 +1527,11 @@ namespace sh::robinhood
 				do_swap(other, these_buckets_other_allocator);
 				do_swap(*this, other_buckets_this_allocator);
 
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
 				// Invalidate source & destination iterators on swap with stateful, non-equivalent, and non-swap-propagated allocators.
 				invalidate_iterators();
 				other.invalidate_iterators();
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			}
 		}
 		friend void swap(buckets& lhs, buckets& rhs)
@@ -1449,14 +1545,7 @@ namespace sh::robinhood
 		 */
 		constexpr bool get_wide() const noexcept
 		{
-			if constexpr (policy_type::constant_width)
-			{
-				return false;
-			}
-			else
-			{
-				return this->m_wide;
-			}
+			return this->buckets_info_type::get_wide();
 		}
 		/**	Returns the current capacity for values.
 		 *	@return The current capacity for values.
@@ -1482,11 +1571,11 @@ namespace sh::robinhood
 		 *	@tparam InfoType The type of Robinhood info elements in the info element array.
 		 */
 		template <typename InfoType, typename... Args>
-		void emplace(InfoType* const info, const size_type index, const InfoType& info_value, Args&&... args)
+		void emplace(InfoType* const SH_ROBINHOOD_RESTRICT info, const size_type index, const InfoType& info_value, Args&&... args)
 			noexcept(noexcept(this->construct_value(size_type{}, args...)))
 		{
-			SH_ROBINHOOD_ASSERT(index < m_capacity);
-			SH_ROBINHOOD_ASSERT(empty(info, index) == true);
+			SH_ROBINHOOD_ASSERT(index < m_capacity, "Cannot robinhood::buckets::emplace at index at or beyond capacity.");
+			SH_ROBINHOOD_ASSERT(empty(info, index) == true, "Cannot robinhood::buckets::emplace at index that is not empty.");
 			info[index] = info_value;
 			construct_value(index, std::forward<Args>(args)...);
 			++m_count;
@@ -1500,10 +1589,10 @@ namespace sh::robinhood
 		 *	@tparam InfoType The type of Robinhood info elements in the info element array.
 		 */
 		template <typename InfoType>
-		void erase(InfoType* const info, const size_type index) noexcept
+		void erase(InfoType* const SH_ROBINHOOD_RESTRICT info, const size_type index) noexcept
 		{
-			SH_ROBINHOOD_ASSERT(index < m_capacity);
-			SH_ROBINHOOD_ASSERT(empty(info, index) == false);
+			SH_ROBINHOOD_ASSERT(index < m_capacity, "Cannot robinhood::buckets::erase at index at or beyond capacity.");
+			SH_ROBINHOOD_ASSERT(empty(info, index) == false, "Cannot robinhood::buckets::erase at index that is empty.");
 			destroy_value(index);
 			info[index].clear();
 			--m_count;
@@ -1517,75 +1606,95 @@ namespace sh::robinhood
 			// If m_count == 0, there are no values to destruct.
 			if (m_count > 0)
 			{
-				with_info([this](auto* const info) noexcept
+				with_info([this](auto* const SH_ROBINHOOD_RESTRICT info) noexcept
 				{
 					// If value_type is trivially destructible, clear info in bulk..
 					if constexpr (std::is_trivially_destructible_v<value_type>)
 					{
-						clear_info(info, m_capacity); // no + info_tail
+						this->clear_info(info, m_capacity); // no + info_tail
 					}
 					else
 					{
-						destruct_values_and_clear_info(info);
+						this->destruct_values_and_clear_info(info);
 					}
 				});
 				m_count = 0;
 			}
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			// Invalidate iterators on clear.
 			invalidate_iterators();
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 		}
 
+		/**	Return a reference to buckets_info.
+		 *	@return A reference to buckets_info.
+		 */
+		constexpr buckets_info_type& get_buckets_info() noexcept
+		{
+			return static_cast<buckets_info_type&>(*this);
+		}
+		/**	Return a constant reference to buckets_info.
+		 *	@return A constant reference to buckets_info.
+		 */
+		constexpr const buckets_info_type& get_buckets_info() const noexcept
+		{
+			return static_cast<const buckets_info_type&>(*this);
+		}
 		/**	Calls func with a pointer to constant Robinhood info elements.
 		 *	@note If m_info is altered during the runtime of func, the info parameter may become outdated.
+		 *	@param buckets_info Information about the Robinhood info elements.
+		 *	@param info A void pointer to Robinhood info elements.
+		 *	@param func A function to call with a typed pointer to either constant or mutable Robinhood info elements, depending on I.
+		 *	@return The return value from func.
+		 *	@tparam I Either void or const void.
+		 */
+		template <typename I, typename F,
+			typename = std::enable_if_t<std::is_same_v<std::remove_const_t<I>, void>>
+		>
+		static constexpr auto with_info(const buckets_info_type& buckets_info, I* const SH_ROBINHOOD_RESTRICT info, F&& func)
+			noexcept(noexcept(func(std::declval<narrow_info_type*>())))
+		{
+			constexpr bool is_const = std::is_const_v<I>;
+			using narrow_type = std::conditional_t<is_const, const narrow_info_type, narrow_info_type>;
+			using wide_type = std::conditional_t<is_const, const wide_info_type, wide_info_type>;
+			if constexpr (policy_type::constant_width)
+			{
+				return func(static_cast<narrow_type*>(info));
+			}
+			else
+			{
+				// Optimistically assume our info is narrow.
+				if SH_ROBINHOOD_UNLIKELY(buckets_info.get_wide())
+				{
+					return func(static_cast<wide_type*>(info));
+				}
+				else
+				{
+					return func(static_cast<narrow_type*>(info));
+				}
+			}
+		}
+		/**	Calls func with a pointer to mutable Robinhood info elements.
+		 *	@note If m_info is altered during the runtime of func, the info parameter may become outdated.
+		 *	@param func A function to call with a typed pointer to mutable Robinhood info elements.
 		 *	@return The return value from func.
 		 */
 		template <typename F>
 		constexpr auto with_info(F&& func)
 			noexcept(noexcept(func(std::declval<narrow_info_type*>())))
 		{
-			if constexpr (policy_type::constant_width)
-			{
-				return func(get_info<narrow_info_type>());
-			}
-			else
-			{
-				// Optimistcally assume our info is narrow.
-				if SH_ROBINHOOD_UNLIKELY(this->m_wide)
-				{
-					return func(get_info<wide_info_type>());
-				}
-				else
-				{
-					return func(get_info<narrow_info_type>());
-				}
-			}
+			return with_info(*this, get_info<void>(), func);
 		}
 		/**	Calls func with a pointer to constant Robinhood info elements.
 		 *	@note If m_info is altered during the runtime of func, the info parameter may become outdated.
+		 *	@param func A function to call with a typed pointer to constant Robinhood info elements.
 		 *	@return The return value from func.
 		 */
 		template <typename F>
 		constexpr auto with_info(F&& func) const
 			noexcept(noexcept(func(std::declval<const narrow_info_type*>())))
 		{
-			if constexpr (policy_type::constant_width)
-			{
-				return func(get_info<narrow_info_type>());
-			}
-			else
-			{
-				// Optimistcally assume our info is narrow.
-				if SH_ROBINHOOD_UNLIKELY(this->m_wide)
-				{
-					return func(get_info<wide_info_type>());
-				}
-				else
-				{
-					return func(get_info<narrow_info_type>());
-				}
-			}
+			return with_info(*this, get_info<void>(), func);
 		}
 		/**	Return a pointer to mutable Robinhood info elements.
 		 *	@note Only asserts that the Robinhood info elements are in-fact stored as InfoType.
@@ -1595,8 +1704,10 @@ namespace sh::robinhood
 		template <typename InfoType>
 		constexpr InfoType* get_info() noexcept
 		{
-			SH_ROBINHOOD_ASSERT((get_wide() == false || std::is_same_v<InfoType, wide_info_type> || std::is_same_v<InfoType, void>));
-			SH_ROBINHOOD_ASSERT((get_wide() == true || std::is_same_v<InfoType, narrow_info_type> || std::is_same_v<InfoType, void>));
+			SH_ROBINHOOD_ASSERT((get_wide() == false || std::is_same_v<InfoType, wide_info_type> || std::is_same_v<InfoType, void>),
+				"If get_wide is true, cannot robinhood::buckets::get_info<narrow_info_type>.");
+			SH_ROBINHOOD_ASSERT((get_wide() == true || std::is_same_v<InfoType, narrow_info_type> || std::is_same_v<InfoType, void>),
+				"If get_wide is false, cannot robinhood::buckets::get_info<wide_info_type>.");
 			return static_cast<InfoType*>(m_info);
 		}
 		/**	Return a pointer to mutable Robinhood info elements.
@@ -1607,8 +1718,10 @@ namespace sh::robinhood
 		template <typename InfoType>
 		constexpr const InfoType* get_info() const noexcept
 		{
-			SH_ROBINHOOD_ASSERT((get_wide() == false || std::is_same_v<InfoType, wide_info_type> || std::is_same_v<InfoType, void>));
-			SH_ROBINHOOD_ASSERT((get_wide() == true || std::is_same_v<InfoType, narrow_info_type> || std::is_same_v<InfoType, void>));
+			SH_ROBINHOOD_ASSERT((get_wide() == false || std::is_same_v<InfoType, wide_info_type> || std::is_same_v<InfoType, void>),
+				"If get_wide is true, cannot robinhood::buckets::get_info<narrow_info_type>.");
+			SH_ROBINHOOD_ASSERT((get_wide() == true || std::is_same_v<InfoType, narrow_info_type> || std::is_same_v<InfoType, void>),
+				"If get_wide is false, cannot robinhood::buckets::get_info<wide_info_type>.");
 			return static_cast<const InfoType*>(m_info);
 		}
 
@@ -1618,12 +1731,12 @@ namespace sh::robinhood
 		void widen()
 		{
 			static_assert(policy_type::constant_width == false);
-			SH_ROBINHOOD_ASSERT(get_wide() == false);
-			SH_ROBINHOOD_ASSERT(m_count > 0);
+			SH_ROBINHOOD_ASSERT(get_wide() == false, "Can only robinhood::buckets::widen if not already wide.");
+			SH_ROBINHOOD_ASSERT(m_count > 0, "Unexpected robinhood::buckets::widen with no values counted.");
 			auto narrow_info_alloc = get_info_allocator<narrow_info_type>();
 			auto wide_info_alloc = get_info_allocator<wide_info_type>();
-			auto* const narrow_info = get_info<narrow_info_type>();
-			auto* const wide_info = rebind_traits<wide_info_type>::allocate(wide_info_alloc, m_capacity + info_tail);
+			auto* const SH_ROBINHOOD_RESTRICT narrow_info = get_info<narrow_info_type>();
+			auto* const SH_ROBINHOOD_RESTRICT wide_info = rebind_traits<wide_info_type>::allocate(wide_info_alloc, m_capacity + info_tail);
 			std::copy(narrow_info, narrow_info + (m_capacity + info_tail), wide_info);
 			rebind_traits<narrow_info_type>::deallocate(narrow_info_alloc, narrow_info, m_capacity + info_tail);
 			set_wide(true);
@@ -1632,15 +1745,35 @@ namespace sh::robinhood
 
 		/**	Get a mutable value_type reference by index.
 		 *	@note Only asserts that indices are within bounds & currently constructed.
+		 *	@param data A pointer to an array of storage of (possibly unconstructed) objects of value_type.
+		 *	@param buckets_info Information about the Robinhood info elements.
+		 *	@param info A void pointer to Robinhood info elements.
+		 *	@param index The presently constructed index to return a value_type reference.
+		 *	@param capacity The capacity or data and info.
+		 *	@return A contant or mutable reference to a value_type at index, depending on T.
+		 *	@tparam T Either value_type or const value_type.
+		 */
+		template <typename T,
+			typename = std::enable_if_t<std::is_same_v<std::remove_const_t<T>, value_type>>
+		>
+		static T& get_value(T* const SH_ROBINHOOD_RESTRICT data, const buckets_info_type& buckets_info, const void* const SH_ROBINHOOD_RESTRICT info, const size_type index, const size_type capacity) noexcept
+		{
+			SH_ROBINHOOD_ASSERT(data != nullptr, "Cannot robinhood::buckets::get_value from nullptr data.");
+			SH_ROBINHOOD_ASSERT(index < capacity, "Cannot robinhood::buckets::get_value from index at or beyond capacity.");
+			SH_ROBINHOOD_ASSERT(buckets_info.get_wide() == true || static_cast<const narrow_info_type*>(info)[index].empty() == false,
+				"Cannot robinhood::buckets::get_value from index that is empty.");
+			SH_ROBINHOOD_ASSERT(buckets_info.get_wide() == false || static_cast<const wide_info_type*>(info)[index].empty() == false,
+				"Cannot robinhood::buckets::get_value from index that is empty.");
+			return *get_value_address(data, index, capacity);
+		}
+		/**	Get a mutable value_type reference by index.
+		 *	@note Only asserts that indices are within bounds & currently constructed.
 		 *	@param index The presently constructed index to return a value_type reference.
 		 *	@return A mutable reference to a value_type at index.
 		 */
 		value_type& get_value(const size_type index) noexcept
 		{
-			SH_ROBINHOOD_ASSERT(index < m_capacity);
-			SH_ROBINHOOD_ASSERT(get_wide() == true || get_info<narrow_info_type>()[index].empty() == false);
-			SH_ROBINHOOD_ASSERT(get_wide() == false || get_info<wide_info_type>()[index].empty() == false);
-			return *get_value_address(index);
+			return get_value(m_data, get_buckets_info(), m_info, index, m_capacity);
 		}
 		/**	Get a constant value_type reference by index.
 		 *	@note Only asserts that indices are within bounds & currently constructed.
@@ -1649,10 +1782,7 @@ namespace sh::robinhood
 		 */
 		const value_type& get_value(const size_type index) const noexcept
 		{
-			SH_ROBINHOOD_ASSERT(index < m_capacity);
-			SH_ROBINHOOD_ASSERT(get_wide() == true || get_info<narrow_info_type>()[index].empty() == false);
-			SH_ROBINHOOD_ASSERT(get_wide() == false || get_info<wide_info_type>()[index].empty() == false);
-			return *get_value_address(index);
+			return get_value(m_data, get_buckets_info(), m_info, index, m_capacity);
 		}
 
 		/**	Swaps & decreases the distance of an info & value to an earlier (closer to its hash_clamp) index.
@@ -1664,11 +1794,11 @@ namespace sh::robinhood
 		 *	@tparam InfoType The type of Robinhood info elements in the info element array.
 		 */
 		template <typename InfoType>
-		void move_back(InfoType* const info, const size_type former_index, const size_type current_index) noexcept
+		void move_back(InfoType* const SH_ROBINHOOD_RESTRICT info, const size_type former_index, const size_type current_index) noexcept
 		{
-			SH_ROBINHOOD_ASSERT(former_index < m_capacity);
-			SH_ROBINHOOD_ASSERT(empty(info, former_index) == true);
-			SH_ROBINHOOD_ASSERT(empty(info, current_index) == false);
+			SH_ROBINHOOD_ASSERT(former_index < m_capacity, "Cannot robinhood::buckets::move_back to (former) index at or beyond capacity.");
+			SH_ROBINHOOD_ASSERT(empty(info, former_index) == true, "Cannot robinhood::buckets::move_back to (former) index that isn't empty.");
+			SH_ROBINHOOD_ASSERT(empty(info, current_index) == false, "Cannot robinhood::buckets::move_back from (current) index that is empty.");
 			static_assert(std::is_nothrow_move_constructible_v<value_type>, "value_type must be nothrow move constructible.");
 			construct_value(former_index, std::move(get_value(current_index)));
 			static_assert(std::is_nothrow_copy_assignable_v<InfoType>, "InfoType excepted to have noexcept copy assignment operation.");
@@ -1677,6 +1807,34 @@ namespace sh::robinhood
 			info[current_index].clear();
 		}
 
+		/**	Return the address of the value array.
+		 *	@return The address of the value array.
+		 */
+		constexpr value_type* get_data() noexcept
+		{
+			return m_data;
+		}
+		/**	Return the address of the value array.
+		 *	@return The address of the value array.
+		 */
+		constexpr const value_type* get_data() const noexcept
+		{
+			return m_data;
+		}
+
+		/**	Return the address of a value by index in a minimally-safe fashion.
+		 *	@note Only asserts that the index is in bounds and allows accessing one-past for iterator values. Does not check that it's currently constructed.
+		 *	@param index The index of the value to return.
+		 *	@return The address of a value.
+		 */
+		template <typename T,
+			typename = std::enable_if_t<std::is_same_v<std::remove_const_t<T>, value_type>>
+		>
+		static constexpr T* get_value_address(T* const data, const size_type index, const size_type capacity) noexcept
+		{
+			SH_ROBINHOOD_ASSERT(index <= capacity, "Cannot robinhood::buckets::get_value_address at index beyond capacity.");
+			return data + index;
+		}
 		/**	Return the address of a value by index in a minimally-safe fashion.
 		 *	@note Only asserts that the index is in bounds and allows accessing one-past for iterator values. Does not check that it's currently constructed.
 		 *	@param index The index of the value to return.
@@ -1684,8 +1842,7 @@ namespace sh::robinhood
 		 */
 		constexpr pointer get_value_address(const size_type index) noexcept
 		{
-			SH_ROBINHOOD_ASSERT(index <= m_capacity);
-			return m_data + index;
+			return get_value_address(m_data, index, m_capacity);
 		}
 		/**	Return the address of a value by index in a minimally-safe fashion.
 		 *	@note Only asserts that the index is in bounds and allows accessing one-past for iterator values. Does not check that it's currently constructed.
@@ -1694,8 +1851,7 @@ namespace sh::robinhood
 		 */
 		constexpr const_pointer get_value_address(const size_type index) const noexcept
 		{
-			SH_ROBINHOOD_ASSERT(index <= m_capacity);
-			return m_data + index;
+			return get_value_address(m_data, index, m_capacity);
 		}
 
 		/**	Destruct the given value without updating info or m_count.
@@ -1704,7 +1860,7 @@ namespace sh::robinhood
 		 */
 		void destroy(value_type& v) noexcept
 		{
-			SH_ROBINHOOD_ASSERT(&v >= get_value_address(0) && &v < get_value_address(m_capacity));
+			SH_ROBINHOOD_ASSERT(&v >= get_value_address(0) && &v < get_value_address(m_capacity), "Cannot robinhood::buckets::destroy value reference not contained within m_data.");
 			rebind_traits<value_type>::destroy(get_allocator(), &v);
 		}
 		/**	If the caller has called destroy_value on all values and these buckets are to be destructed, mark count as zero to prevent re-iterating (and double destroying!) the buckets.
@@ -1730,46 +1886,58 @@ namespace sh::robinhood
 			return static_cast<const allocator_type&>(*this);
 		}
 
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-		/**	Return an initial value for a debug iterator generation.
-		 *	@details Not required to always return the same value.
-		 *	@return An initial value for a debug iterator generation.
-		 */
-		constexpr static size_type initialize_generation() noexcept
-		{
-			// Could use a pseudo-random number to initialize.
-			return 0;
-		}
-
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
 		/**	Invalidate the current the debug iterator generation.
-		 *	@details Not required to always increment by one.
 		 */
 		void invalidate_iterators() noexcept
 		{
-			// Could increment by a non-one value to prevent intersection.
-			++m_generation;
+			if (m_iterator_validator)
+			{
+				m_iterator_validator->invalidate();
+			}
 		}
 
-		/**	Check the validity of a given iterator debugging info.
-		 *	@param index The index of the iteration supplying debug.
-		 *	@param debug The iterator debug info.
-		 *	@return True if the given iterator debugging info is valid.
+		/**	Move the iterator validator from another buckets into this.
+		 *	@param other The buckets from which to move the iterator validator.
 		 */
-		constexpr bool check_iterator_debug(const size_type index, const iterator_debug<size_type>& debug) const noexcept
+		void move_iterator_validator(buckets& other)
 		{
-			return m_capacity == debug.m_capacity
-				// end() is given a pass on matching m_generation (as long as capacity matched above).
-				&& (index == m_capacity || m_generation == debug.m_generation);
+			invalidate_iterators();
+			m_iterator_validator = std::exchange(other.m_iterator_validator, nullptr);
+			if (m_iterator_validator)
+			{
+				m_iterator_validator->set_buckets(*this);
+			}
+		}
+
+		/**	Swap the iterator validator with another buckets.
+		 *	@param other The buckets which will swap iterator validators with this.
+		 */
+		void swap_iterator_validator(buckets& other)
+		{
+			std::swap(m_iterator_validator, other.m_iterator_validator);
+			if (m_iterator_validator)
+			{
+				m_iterator_validator->set_buckets(*this);
+			}
+			if (other.m_iterator_validator)
+			{
+				other.m_iterator_validator->set_buckets(other);
+			}
 		}
 
 		/**	Return the iterator debugging info.
-		 *	@return The iterator debugging info.
+		 *	@return The iterator debugging info. Iterators should retain this as a std::weak_ptr.
 		 */
-		constexpr iterator_debug<size_type> get_iterator_debug() const noexcept
+		std::shared_ptr<iterator_validator<buckets>> get_iterator_validator() const noexcept
 		{
-			return iterator_debug<size_type>{ m_generation, m_capacity };
+			if (m_iterator_validator == nullptr)
+			{
+				m_iterator_validator = std::make_shared<iterator_validator<buckets>>(*this);
+			}
+			return m_iterator_validator;
 		}
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 
 	private:
 		/**	Set if Robinhood info elements are stored in narrow_info_type (false) or wide_info_type (true).
@@ -1779,7 +1947,7 @@ namespace sh::robinhood
 		{
 			if constexpr (policy_type::constant_width)
 			{
-				SH_ROBINHOOD_ASSERT(wide == false);
+				SH_ROBINHOOD_ASSERT(wide == false, "Cannot robinhood::buckets::set_wide to widen with a constant width policy.");
 			}
 			else
 			{
@@ -1817,7 +1985,7 @@ namespace sh::robinhood
 			constexpr auto distance = empty_distance_v<typename InfoType::distance_type>;
 			constexpr std::size_t cached_hash = 0;
 			static InfoType static_empty_info(distance, cached_hash);
-			SH_ROBINHOOD_ASSERT(static_empty_info.empty());
+			SH_ROBINHOOD_ASSERT(static_empty_info.empty(), "robinhood::buckets::empty_info is returning an invalid non-empty InfoType.");
 			return static_empty_info;
 		}
 
@@ -1843,8 +2011,8 @@ namespace sh::robinhood
 		 */
 		void destroy_value(const size_type index) noexcept
 		{
-			SH_ROBINHOOD_ASSERT(index < m_capacity);
-			SH_ROBINHOOD_ASSERT(empty(index) == false);
+			SH_ROBINHOOD_ASSERT(index < m_capacity, "Cannot robinhood::buckets::destroy_value at index at or beyond m_capacity.");
+			SH_ROBINHOOD_ASSERT(empty(index) == false, "Cannot robinhood::buckets::destroy_value at index that's already empty.");
 			rebind_traits<value_type>::destroy(get_allocator(), get_value_address(index));
 		}
 
@@ -1856,10 +2024,12 @@ namespace sh::robinhood
 		 *	@tparam InfoType The type of the given source & destination Robinhood info elements.
 		 */
 		template <typename InfoType>
-		static void copy_trivial_info(InfoType* const dst, const InfoType* const src, const size_type n) noexcept
+		static void copy_trivial_info(InfoType* const SH_ROBINHOOD_RESTRICT dst, const InfoType* const SH_ROBINHOOD_RESTRICT src, const size_type n) noexcept
 		{
 			static_assert(is_trivial_v<InfoType>, "InfoType required to be trivial in order to be memcpy-able.");
 			static_assert(std::is_same_v<InfoType, narrow_info_type> || std::is_same_v<InfoType, wide_info_type>, "Is this actually an InfoType?");
+			SH_ROBINHOOD_ASSERT(dst != src,
+				"Assumption that robinhood::buckets::copy_trivial_info takes differing destination & source.");
 			std::memcpy(dst, src, sizeof(InfoType) * n);
 		}
 		/**	Bulk clear info values.
@@ -1869,7 +2039,7 @@ namespace sh::robinhood
 		 *	@tparam InfoType The type of the given Robinhood info elements.
 		 */
 		template <typename InfoType>
-		static void clear_info(InfoType* const info, const size_type n) noexcept
+		static void clear_info(InfoType* const SH_ROBINHOOD_RESTRICT info, const size_type n) noexcept
 		{
 			static_assert(is_trivial_v<InfoType>, "InfoType required to be trivial in order to be memset-able.");
 			static_assert(std::is_same_v<InfoType, narrow_info_type> || std::is_same_v<InfoType, wide_info_type>, "Is this actually an InfoType?");
@@ -1883,31 +2053,42 @@ namespace sh::robinhood
 		 *	@param src The copy source , which is an array of "n" (possibly initialized) value_type elements.
 		 *	@param n The number of value_type elements in both dst and src.
 		 */
-		static void copy_trivial_values(value_type* const dst, const value_type* const src, const size_type n) noexcept
+		static void copy_trivial_values(value_type* const SH_ROBINHOOD_RESTRICT dst, const value_type* const SH_ROBINHOOD_RESTRICT src, const size_type n) noexcept
 		{
 			static_assert(is_trivial_v<value_type>, "ValueType required to be trivial in order to be memcpy-able.");
-			std::memcpy(dst, src, sizeof(value_type) * n);
+			SH_ROBINHOOD_ASSERT(dst != src,
+				"Assumption that robinhood::buckets::copy_trivial_values takes differing destination & source.");
+			std::memcpy(static_cast<void*>(dst), static_cast<const void*>(src), sizeof(value_type) * n);
 		}
 
 		/**	Initialize one or more values from given buckets.
 		 *	@note Expects other's m_count to be greater than zero. This and other must share the same width and allocated capacity. Does not destroy or check existing data or info in this prior to copying/moving. Cannot be relied upon to always set m_count or m_capacity.
 		 *	@param other The source of values to copy or move.
 		 *	@param copy_or_move The adapter function to cast the value to the type from which to construct.
-		 *	@tparam Buckets Either buckets or const buckets.
+		 *	@tparam BucketsType Either buckets or const buckets.
 		 *	@tparam InfoType Other's info type.
 		 *	@tparam CopyOrMove Accepts the copied value and can return it either by reference or as a move-reference.
 		 */
 		template <typename BucketsType, typename InfoType, typename CopyOrMove>
-		void initialize_values(BucketsType& other, const InfoType* const other_info, CopyOrMove&& copy_or_move)
+		void initialize_values(BucketsType& other, const InfoType* const SH_ROBINHOOD_RESTRICT other_info, CopyOrMove&& copy_or_move)
 			noexcept(noexcept(copy_or_move(std::declval<value_type&>())))
 		{
+			SH_ROBINHOOD_ASSERT(this != &other,
+				"Assumption that robinhood::buckets::initialize_values takes non-this buckets.");
+			SH_ROBINHOOD_ASSERT(this->m_info != other_info,
+				"Assumption that robinhood::buckets::initialize_values takes non-this buckets.");
+			SH_ROBINHOOD_ASSERT(m_capacity == other.m_capacity,
+				"Assumption that robinhood::buckets::initialize_values sees already initialized m_capacity.");
 			// Assume that other is non-empty and SH_ROBINHOOD_ASSERT that is true.
-			SH_ROBINHOOD_ASSERT(other.m_count > 0);
+			SH_ROBINHOOD_ASSERT(other.m_count > 0,
+				"Assumption that robinhood::buckets::initialize_values takes non-empty other buckets.");
 			// Check that destination data are allocated.
-			SH_ROBINHOOD_ASSERT(m_data != nullptr);
-			SH_ROBINHOOD_ASSERT(m_info != &empty_info<narrow_info_type>() && m_info != &empty_info<wide_info_type>());
+			SH_ROBINHOOD_ASSERT(m_data != nullptr,
+				"Assumption that robinhood::buckets::initialize_values initializes data that's already allocated.");
+			SH_ROBINHOOD_ASSERT(m_info != &empty_info<narrow_info_type>() && m_info != &empty_info<wide_info_type>(),
+				"Assumption that robinhood::buckets::initialize_values initializes info that's already allocated.");
 			// Will SH_ROBINHOOD_ASSERT that info is of the appropriate type: get_wide() must match.
-			InfoType* const info = get_info<InfoType>();
+			InfoType* const SH_ROBINHOOD_RESTRICT info = get_info<InfoType>();
 			if constexpr (is_trivial_v<value_type>)
 			{
 				// value_type is trivial, copy info & data in bulk.
@@ -1916,20 +2097,13 @@ namespace sh::robinhood
 			}
 			else
 			{
-#ifndef NDEBUG
-				// To quiet the SH_ROBINHOOD_ASSERT in construct_value below, set the capacity early.
-				m_capacity = other.m_capacity;
-#endif // !NDEBUG
 				// Copy & construct [0, info_tail):
-				for (size_type index = 0; index < other.m_capacity; ++index)
+				const size_type other_capacity{ other.m_capacity };
+				for (size_type index = 0; index < other_capacity; ++index)
 				{
 					// As our data is newly allocated, there are no values to destroy_value.
 					if (other_info[index].empty() == false)
 					{
-#ifndef NDEBUG
-						// Info is undefined, clear it for the asserts in construct_value.
-						info[index].clear();
-#endif // !NDEBUG
 						construct_value(index, copy_or_move(other.get_value(index)));
 					}
 					// Outside of the conditional to allow additional optimization.
@@ -1947,7 +2121,12 @@ namespace sh::robinhood
 		template <typename InfoType>
 		void initialize_values_by_move(buckets& other, const InfoType* const other_info)
 		{
-			initialize_values(other, other_info, [](value_type& value) noexcept { return std::move_if_noexcept(value); });
+			constexpr auto move_if_noexcept = [](value_type& value) constexpr noexcept
+				-> decltype(auto)
+			{
+				return std::move_if_noexcept(value);
+			};
+			initialize_values(other, other_info, move_if_noexcept);
 		}
 
 		/**	Allocate bucket space and initialize one or more possible values from given buckets.
@@ -1955,31 +2134,34 @@ namespace sh::robinhood
 		 *	@details Allocation will be done prior to copy_or_move. Hence, if copy_or_move is noexcept it can be destructive (move) from other's values without concern for revertibility.
 		 *	@param other The source of values to copy or move.
 		 *	@param copy_or_move The adapter function to cast the value to the type from which to construct.
-		 *	@tparam Buckets Either buckets or const buckets.
+		 *	@tparam BucketsType Either buckets or const buckets.
 		 *	@tparam CopyOrMove Accepts the copied value and can return it either by reference or as a move-reference.
 		 */
 		template <typename BucketsType, typename CopyOrMove>
 		void allocate_and_initialize_one_or_more_values(BucketsType& other, CopyOrMove&& copy_or_move)
 		{
-			SH_ROBINHOOD_ASSERT(other.m_capacity > 0);
+			SH_ROBINHOOD_ASSERT(other.m_capacity > 0,
+				"Assumption that robinhood::buckets::allocate_and_initialize_one_or_more_values takes non-zero capacity other buckets.");
+			SH_ROBINHOOD_ASSERT(this != &other,
+				"Assumption that robinhood::buckets::allocate_and_initialize_one_or_more_values takes non-this buckets.");
 			// Since other.m_capacity is non-zero, m_info & m_data must be allocated;
 			m_data = rebind_traits<value_type>::allocate(get_allocator(), other.m_capacity);
-			other.with_info([this, &other, &copy_or_move](const auto* const other_info)
+			other.with_info([this, &other, &copy_or_move](const auto* const SH_ROBINHOOD_RESTRICT other_info)
 			{
 				using other_info_type = std::decay_t<decltype(*other_info)>;
-				auto info_alloc = get_info_allocator<other_info_type>();
+				auto info_alloc = this->get_info_allocator<other_info_type>();
 				// Allocate & store this bucket's new info.
-				auto* const info = rebind_traits<other_info_type>::allocate(info_alloc, other.m_capacity + info_tail);
-				m_info = info;
+				auto* const SH_ROBINHOOD_RESTRICT info = rebind_traits<other_info_type>::allocate(info_alloc, other.m_capacity + info_tail);
+				this->m_info = info;
 				if (other.m_count == 0)
 				{
 					// other is empty, just clear our newly allocated info.
-					clear_info(info, other.m_capacity + info_tail);
+					this->clear_info(info, other.m_capacity + info_tail);
 				}
 				else
 				{
 					// other is non-empty
-					initialize_values(other, other_info, std::forward<CopyOrMove>(copy_or_move));
+					this->initialize_values(other, other_info, std::forward<CopyOrMove>(copy_or_move));
 				}
 			});
 			// Does not always set m_count or m_capacity!
@@ -1989,20 +2171,30 @@ namespace sh::robinhood
 		 */
 		void allocate_and_initialize_one_or_more_values_by_copy(const buckets& other)
 		{
-			allocate_and_initialize_one_or_more_values(other, [](const value_type& value) -> const value_type& { return value; });
+			constexpr auto identity = [](const value_type& value) constexpr noexcept
+				-> const value_type&
+			{
+				return value;
+			};
+			allocate_and_initialize_one_or_more_values(other, identity);
 		}
 		/**	Allocates bucket space and initializes by move_if_noexcept one or more possible values from given buckets.
 		 *	@param other The source of values to move.
 		 */
 		void allocate_and_initialize_one_or_more_values_by_move(buckets& other)
 		{
-			allocate_and_initialize_one_or_more_values(other, [](value_type& value) noexcept { return std::move_if_noexcept(value); });
+			constexpr auto move_if_noexcept = [](value_type& value) constexpr noexcept
+				-> decltype(auto)
+			{
+				return std::move_if_noexcept(value);
+			};
+			allocate_and_initialize_one_or_more_values(other, move_if_noexcept);
 		}
 		/**	Allocates bucket space and initializes values from another buckets.
 		 *	@note Does not destroy or check existing data or info prior to allocating & copying/moving. Cannot be relied upon to always set m_count or m_capacity.
 		 *	@param other The source of values to copy or move.
 		 *	@param copy_or_move The adapter function to cast the value to the type from which to construct.
-		 *	@tparam Buckets Either buckets or const buckets.
+		 *	@tparam BucketsType Either buckets or const buckets.
 		 *	@tparam CopyOrMove Accepts the copied value and can return it either by reference or as a move-reference.
 		 */
 		template <typename BucketsType, typename CopyOrMove>
@@ -2029,21 +2221,31 @@ namespace sh::robinhood
 		 */
 		void allocate_and_initialize_values_by_copy(const buckets& other)
 		{
-			allocate_and_initialize_values(other, [](const value_type& value) -> const value_type& { return value; });
+			constexpr auto identity = [](const value_type& value) constexpr noexcept
+				-> const value_type&
+			{
+				return value;
+			};
+			allocate_and_initialize_values(other, identity);
 		}
 		/**	Allocates bucket space and initializes values by move_if_noexcept from given buckets.
 		 *	@param other The source of values to move.
 		 */
 		void allocate_and_initialize_values_by_move(buckets& other)
 		{
-			allocate_and_initialize_values(other, [](value_type& value) noexcept { return std::move_if_noexcept(value); });
+			constexpr auto move_if_noexcept = [](value_type& value) constexpr noexcept
+				-> decltype(auto)
+			{
+				return std::move_if_noexcept(value);
+			};
+			allocate_and_initialize_values(other, move_if_noexcept);
 		}
 
 		/**	Replaces values from given buckets with the same capacity & get_wide values as ours.
 		 *	@note Appropriately handles if this has allocated values.
 		 *	@param other The source of values to copy or move.
 		 *	@param copy_or_move The adapter function to cast the value to the type from which to construct.
-		 *	@tparam Buckets Either buckets or const buckets.
+		 *	@tparam BucketsType Either buckets or const buckets.
 		 *	@tparam CopyOrMove Accepts the copied value and can return it either by reference or as a move-reference.
 		 */
 		template <typename BucketsType, typename CopyOrMove>
@@ -2051,34 +2253,46 @@ namespace sh::robinhood
 		{
 			static_assert(std::is_same_v<std::decay_t<BucketsType>, buckets>, "Only expects to be given a buckets type.");
 			// Assert preconditions:
-			SH_ROBINHOOD_ASSERT(m_capacity == other.m_capacity);
-			SH_ROBINHOOD_ASSERT(get_wide() == other.get_wide());
+			SH_ROBINHOOD_ASSERT(this != &other,
+				"Assumption that robinhood::buckets::replace_values_from_same_sized_buckets takes non-this buckets.");
+			SH_ROBINHOOD_ASSERT(m_capacity == other.m_capacity,
+				"Assumption that robinhood::buckets::replace_values_from_same_sized_buckets takes other buckets of the same capacity.");
+			SH_ROBINHOOD_ASSERT(get_wide() == other.get_wide(),
+				"Assumption that robinhood::buckets::replace_values_from_same_sized_buckets takes other buckets of the same info width.");
+#if defined(__llvm__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-lambda-capture"
+#endif // __llvm__
 			if (m_count == 0)
 			{
 				// A m_count of zero means there's nothing constructed to destroy in this.
 				if (other.m_count > 0)
 				{
 					// m_other's count indicates that it does have one or more values to copy.
-					with_info([this, &other, &copy_or_move](auto* const info)
+					with_info([this, &other, &copy_or_move](auto* const SH_ROBINHOOD_RESTRICT info)
 					{
 						using info_type = std::decay_t<decltype(*info)>;
-						// We know other_info's type to be the same type as our info_type as m_capacity & get_wide() were matched above.
-						const auto* const other_info = other.template get_info<info_type>();
+						// We know other_info's type to be the same type as our info_type as m_capacity
+						// & get_wide() were matched by the caller, enforced by the asserts above.
+						const auto* const SH_ROBINHOOD_RESTRICT other_info = other.template get_info<info_type>();
+						SH_ROBINHOOD_ASSERT(info != other_info,
+							"Assumption that robinhood::buckets::replace_values_from_same_sized_buckets takes non-this buckets.");
 						if constexpr (is_trivial_v<value_type>)
 						{
 							// Do a trivial copy of info & data from other to this.
-							copy_trivial_info(info, other_info, m_capacity); // no + info_tail, it's already set
-							copy_trivial_values(m_data, other.m_data, other.m_capacity);
+							this->copy_trivial_info(info, other_info, m_capacity); // no + info_tail, it's already set
+							this->copy_trivial_values(this->m_data, other.m_data, other.m_capacity);
 						}
 						else
 						{
 							// Copy info & data from other where non-empty to this. We know this has no currently constructed values.
-							for (size_type index = 0; index < other.m_capacity; ++index)
+							const size_type other_capacity{ other.m_capacity };
+							for (size_type index = 0; index < other_capacity; ++index)
 							{
 								// As our m_count is zero, there are no values to destroy_value.
 								if (other_info[index].empty() == false)
 								{
-									construct_value(index, copy_or_move(other.get_value(index)));
+									this->construct_value(index, copy_or_move(other.get_value(index)));
 								}
 								// Outside of the conditional to allow additional optimization.
 								info[index] = other_info[index];
@@ -2096,21 +2310,22 @@ namespace sh::robinhood
 			else if (other.m_count == 0)
 			{
 				// Our m_count is non-zero, but other has no constructed values. Clear our info and destroy out values.
-				with_info([this, &other](auto* const info) noexcept
+				with_info([this, &other](auto* const SH_ROBINHOOD_RESTRICT info) noexcept
 				{
 					if constexpr (is_trivial_v<value_type>)
 					{
 						// Do a trivial clear of info & leave data untouched as it's trivial.
-						clear_info(info, m_capacity); // no + info_tail
+						this->clear_info(info, m_capacity); // no + info_tail
 					}
 					else
 					{
 						// Clear info & data where non-empty. We know other has no currently constructed values.
-						for (size_type index = 0; index < other.m_capacity; ++index)
+						const size_type capacity{ m_capacity };
+						for (size_type index = 0; index < capacity; ++index)
 						{
 							if (info[index].empty() == false)
 							{
-								destroy_value(index);
+								this->destroy_value(index);
 							}
 							// Outside of the conditional to allow additional optimization.
 							info[index].clear();
@@ -2121,33 +2336,34 @@ namespace sh::robinhood
 			else
 			{
 				// Both buckets' m_count is non-zero and contain constructed values.
-				with_info([this, &other, &copy_or_move](auto* const info)
+				with_info([this, &other, &copy_or_move](auto* const SH_ROBINHOOD_RESTRICT info)
 				{
 					using info_type = std::decay_t<decltype(*info)>;
-					// We know other_info's type to be the same type as our info_type as m_capacity & get_wide() were matched above.
-					const info_type* const other_info = other.template get_info<info_type>();
+					// We know other_info's type to be the same type as our info_type as m_capacity
+					// & get_wide() were matched by the caller, enforced by the asserts above.
+					const info_type* const SH_ROBINHOOD_RESTRICT other_info = other.template get_info<info_type>();
+					SH_ROBINHOOD_ASSERT(info != other_info,
+						"Assumption that robinhood::buckets::replace_values_from_same_sized_buckets takes non-this buckets.");
 					if constexpr (is_trivial_v<value_type>)
 					{
 						// Do a trivial copy of info & data from other to this.
-						copy_trivial_info(info, other_info, m_capacity); // no + info_tail, it's already set
-						copy_trivial_values(m_data, other.m_data, other.m_capacity);
+						this->copy_trivial_info(info, other_info, m_capacity); // no + info_tail, it's already set
+						this->copy_trivial_values(m_data, other.m_data, other.m_capacity);
 					}
 					else
 					{
 						// Copy info & data from other where non-empty to this. Our data may already be constructed.
-						for (size_type index = 0; index < other.m_capacity; ++index)
+						const size_type other_capacity{ other.m_capacity };
+						for (size_type index = 0; index < other_capacity; ++index)
 						{
+							// Unsafe if this == &other:
 							if (info[index].empty() == false)
 							{
-								destroy_value(index);
-#ifndef NDEBUG
-								// Info is non-empty, clear it for the asserts in construct_value.
-								info[index].clear();
-#endif // !NDEBUG
+								this->destroy_value(index);
 							}
 							if (other_info[index].empty() == false)
 							{
-								construct_value(index, copy_or_move(other.get_value(index)));
+								this->construct_value(index, copy_or_move(other.get_value(index)));
 							}
 							// Outside of the conditional to allow additional optimization.
 							info[index] = other_info[index];
@@ -2155,20 +2371,33 @@ namespace sh::robinhood
 					}
 				});
 			}
+#if defined(__llvm__)
+#pragma clang diagnostic pop
+#endif // __llvm__
 		}
 		/**	Copies values from another buckets that's the same capacity & get_wide type as ourself.
 		 *	@param other The source of values to copy.
 		 */
 		void copy_replace_values_from_same_sized_buckets(const buckets& other)
 		{
-			replace_values_from_same_sized_buckets(other, [](const value_type& value) -> const value_type& { return value; });
+			constexpr auto identity = [](const value_type& value) constexpr noexcept
+				-> const value_type&
+			{
+				return value;
+			};
+			replace_values_from_same_sized_buckets(other, identity);
 		}
 		/**	Moves values from another buckets that's the same capacity & get_wide type as ourself.
 		 *	@param other The source of values to move.
 		 */
 		void move_replace_values_from_same_sized_buckets(buckets& other) noexcept
 		{
-			replace_values_from_same_sized_buckets(other, [](value_type& value) noexcept { return std::move_if_noexcept(value); });
+			constexpr auto move_if_noexcept = [](value_type& value) constexpr noexcept
+				-> decltype(auto)
+			{
+				return std::move_if_noexcept(value);
+			};
+			replace_values_from_same_sized_buckets(other, move_if_noexcept);
 		}
 
 		/**	Destruct all constructed values without updating info. Does not update count.
@@ -2176,9 +2405,10 @@ namespace sh::robinhood
 		 *	@tparam InfoType The type of Robinhood info elements in the info element array.
 		 */
 		template <typename InfoType>
-		void destroy_values(InfoType* const info) noexcept
+		void destroy_values(InfoType* const SH_ROBINHOOD_RESTRICT info) noexcept
 		{
-			for (size_type index = 0; index < m_capacity; ++index)
+			const size_type capacity{ m_capacity };
+			for (size_type index = 0; index < capacity; ++index)
 			{
 				if (info[index].empty() == false)
 				{
@@ -2191,9 +2421,10 @@ namespace sh::robinhood
 		 *	@tparam InfoType The type of Robinhood info elements in the info element array.
 		 */
 		template <typename InfoType>
-		void destruct_values_and_clear_info(InfoType* const info) noexcept
+		void destruct_values_and_clear_info(InfoType* const SH_ROBINHOOD_RESTRICT info) noexcept
 		{
-			for (size_type index = 0; index < m_capacity; ++index)
+			const size_type capacity{ m_capacity };
+			for (size_type index = 0; index < capacity; ++index)
 			{
 				if (info[index].empty() == false)
 				{
@@ -2211,19 +2442,19 @@ namespace sh::robinhood
 			// If m_capacity > 0, deallocation of info & values is required.
 			if (m_capacity > 0)
 			{
-				with_info([this](auto* const info) noexcept
+				with_info([this](auto* const SH_ROBINHOOD_RESTRICT info) noexcept
 				{
 					using info_type = std::decay_t<decltype(*info)>;
 					// If value_type is trivially destructible, skip the iteration over info done in destroy_values.
 					if constexpr (std::is_trivially_destructible_v<value_type> == false)
 					{
 						// If m_count == 0, there are no values to destruct.
-						if (m_count > 0)
+						if (this->m_count > 0)
 						{
-							destroy_values(info);
+							this->destroy_values(info);
 						}
 					}
-					auto info_alloc = get_info_allocator<info_type>();
+					auto info_alloc = this->get_info_allocator<info_type>();
 					rebind_traits<info_type>::deallocate(info_alloc, info, m_capacity + info_tail);
 				});
 				rebind_traits<value_type>::deallocate(get_allocator(), m_data, m_capacity);
@@ -2239,10 +2470,12 @@ namespace sh::robinhood
 		 *	@tparam InfoType The type of Robinhood info elements in the info element array.
 		 */
 		template <typename InfoType>
-		bool empty(const InfoType* const info, const size_type index) const noexcept
+		bool empty(const InfoType* const SH_ROBINHOOD_RESTRICT info, const size_type index) const noexcept
 		{
-			SH_ROBINHOOD_ASSERT(index <= m_capacity);
-			SH_ROBINHOOD_ASSERT(index < m_capacity || info[index].get_distance() == empty_distance_v<typename InfoType::distance_type>);
+			SH_ROBINHOOD_ASSERT(index <= m_capacity,
+				"Cannot check if robinhood::buckets::empty with index beyond capacity.");
+			SH_ROBINHOOD_ASSERT(index < m_capacity || info[index].get_distance() == empty_distance_v<typename InfoType::distance_type>,
+				"Info tail element is not empty during call to robinhood::buckets::empty.");
 			return info[index].empty();
 		}
 
@@ -2253,9 +2486,9 @@ namespace sh::robinhood
 		 */
 		bool empty(const size_type index) const noexcept
 		{
-			return with_info([this, index](const auto* const info) noexcept -> bool
+			return with_info([this, index](const auto* const SH_ROBINHOOD_RESTRICT info) noexcept -> bool
 			{
-				return empty(info, index);
+				return this->empty(info, index);
 			});
 		}
 #endif // !NDEBUG
@@ -2275,22 +2508,29 @@ namespace sh::robinhood
 		/**	The number of currently constructed objects of value_type held in m_data.
 		 */
 		size_type m_count;
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
 		/**	The current "generation" of the data to be used for debug iterators.
 		 *	@details Each iterator-invalidating modification of the table buckets will update this value, causing captured iterator generations to fail to match.
 		 */
-		size_type m_generation;
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+		mutable std::shared_ptr<iterator_validator<buckets>> m_iterator_validator;
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 	};
 
 	/**	An iterator base class for an open-addressing Robinhood hashtable with variable info width.
-	 *	@tparam BucketsType The type of the Robinhood buckets.
+	 *	@tparam BucketsType The type of the Robinhood buckets. May be const or non-const.
+	 *	@tparam ValueType The type of the value returned by dereferencing this iterator. May be const or non-const.
 	 */
-	template <typename BucketsType>
-	class iterator_base
+	template <typename BucketsType, typename ValueType>
+	class iterator_base : private BucketsType::buckets_info_type
 	{
 	protected:
 		using buckets_type = BucketsType;
+		using value_type = ValueType;
+		using buckets_info_type = typename BucketsType::buckets_info_type;
+		using pointer = ValueType*;
+
+		static_assert(std::is_same_v<typename buckets_type::value_type, std::remove_const_t<value_type>>,
+			"Expected ValueType to match the value_type in BucketsType.");
 
 	public:
 		using iterator_category = std::bidirectional_iterator_tag;
@@ -2300,104 +2540,127 @@ namespace sh::robinhood
 		/**	A default-initializing constructor.
 		 */
 		constexpr iterator_base() noexcept
-			: m_buckets(nullptr)
-			, m_index(0)
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			, m_debug{}
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+			: buckets_info_type{ false }
+			, m_info{ nullptr }
+			, m_data{ nullptr }
+			, m_capacity{ 0 }
+			, m_index{ 0 }
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			, m_validator{ nullptr }
+			, m_generation{}
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 		{ }
 		~iterator_base() = default;
 		iterator_base(const iterator_base& other) = default;
 		iterator_base(iterator_base&& other) noexcept = default;
-		template <typename OtherBucketsType>
-		iterator_base(const iterator_base<OtherBucketsType>& other) noexcept
-			: m_buckets(other.get_buckets())
-			, m_index(other.get_index())
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			, m_debug(other.get_debug())
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+		template <typename OtherBucketsType, typename OtherValueType>
+		iterator_base(const iterator_base<OtherBucketsType, OtherValueType>& other) noexcept
+			: buckets_info_type{ other.get_buckets_info() }
+			, m_info{ other.get_info() }
+			, m_data{ other.get_data() }
+			, m_capacity{ other.get_capacity() }
+			, m_index{ other.get_index() }
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			, m_validator{ other.m_validator }
+			, m_generation{ other.m_generation }
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 		{ }
 		iterator_base& operator=(const iterator_base& other) = default;
 		iterator_base& operator=(iterator_base&& other) noexcept = default;
-		template <typename OtherBucketsType>
-		constexpr iterator_base& operator=(const iterator_base<OtherBucketsType>& other) noexcept
+		template <typename OtherBucketsType, typename OtherValueType>
+		constexpr iterator_base& operator=(const iterator_base<OtherBucketsType, OtherValueType>& other) noexcept
 		{
-			m_buckets = other.get_buckets();
+			this->buckets_info_type::operator=(other.get_buckets_info());
+			m_info = other.get_info();
+			m_data = other.get_data();
+			m_capacity = other.get_capacity();
 			m_index = other.get_index();
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			m_debug = other.get_debug();
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			m_validator = other.m_validator;
+			m_generation = other.m_generation;
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			return *this;
 		}
 
 		constexpr void decrement() noexcept
 		{
 			// Decrementing a default iterator is undefined behavior. Also, required for following asserts.
-			SH_ROBINHOOD_ASSERT(get_buckets() != nullptr);
+			SH_ROBINHOOD_ASSERT(get_info() != nullptr, "Decrementing default robinhood::iterator.");
+			SH_ROBINHOOD_ASSERT(get_data() != nullptr, "Decrementing default robinhood::iterator.");
 			// If index is zero, we're going to decrement past the begin iterator.
-			SH_ROBINHOOD_ASSERT(get_index() > 0);
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			SH_ROBINHOOD_ASSERT(get_buckets()->check_iterator_debug(get_index(), get_debug()));
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
-			get_buckets()->with_info([this](const auto* const info) noexcept
+			SH_ROBINHOOD_ASSERT(get_index() > 0, "Underflow on decrementing robinhood::iterator.");
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			SH_ROBINHOOD_ASSERT(validate(), "Decrementing robinhood::iterator that is no longer valid.");
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			buckets_type::with_info(get_buckets_info(), get_info(),
+				[this](const auto* const SH_ROBINHOOD_RESTRICT info) noexcept
 			{
 				do
 				{
-					--m_index;
-				} while(m_index != 0 && info[m_index].empty());
+					--this->m_index;
+				} while(this->m_index != 0 && info[this->m_index].empty());
 			});
 		}
 		constexpr void increment() noexcept
 		{
 			// Incrementing a default iterator is undefined behavior. Also, required for following asserts.
-			SH_ROBINHOOD_ASSERT(get_buckets() != nullptr);
+			SH_ROBINHOOD_ASSERT(get_info() != nullptr, "Incrementing default robinhood::iterator.");
+			SH_ROBINHOOD_ASSERT(get_data() != nullptr, "Incrementing default robinhood::iterator.");
 			// If index is capacity, we're going to increment past the end iterator.
-			SH_ROBINHOOD_ASSERT(get_index() < get_buckets()->get_capacity());
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			SH_ROBINHOOD_ASSERT(get_buckets()->check_iterator_debug(get_index(), get_debug()));
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
-			get_buckets()->with_info([this](const auto* const info) noexcept
+			SH_ROBINHOOD_ASSERT(get_index() < get_capacity(), "Overflow on incrementing robinhood::iterator.");
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			SH_ROBINHOOD_ASSERT(validate(), "Incrementing robinhood::iterator that is no longer valid.");
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			buckets_type::with_info(get_buckets_info(), get_info(),
+				[this](const auto* const SH_ROBINHOOD_RESTRICT info) noexcept
 			{
-				const size_type capacity = get_buckets()->get_capacity();
+				const size_type capacity{ get_capacity() };
 				do
 				{
-					++m_index;
-				} while(m_index != capacity && info[m_index].empty());
+					++this->m_index;
+				} while(this->m_index != capacity && info[this->m_index].empty());
 			});
 		}
 
-		template <typename OtherBucketsType>
-		constexpr bool operator==(const iterator_base<OtherBucketsType>& it) const noexcept
+		template <typename OtherValueType>
+		constexpr bool operator==(const iterator_base<BucketsType, OtherValueType>& it) const noexcept
 		{
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			// Default constructed iterators must be allowed to compare and return equal.
-			SH_ROBINHOOD_ASSERT(get_buckets() == nullptr || get_buckets()->check_iterator_debug(get_index(), get_debug()));
-			SH_ROBINHOOD_ASSERT(it.get_buckets() == nullptr || it.get_buckets()->check_iterator_debug(it.get_index(), it.get_debug()));
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+			SH_ROBINHOOD_ASSERT(get_info() == nullptr || validate(), "Left-hand side of robinhood::iterator operator== is no longer valid.");
+			SH_ROBINHOOD_ASSERT(it.get_info() == nullptr || it.validate(), "Right-hand side of robinhood::iterator operator== is no longer valid.");
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			return get_index() == it.get_index();
 		}
-		template <typename OtherBucketsType>
-		constexpr bool operator!=(const iterator_base<OtherBucketsType>& it) const noexcept
+		template <typename OtherValueType>
+		constexpr bool operator!=(const iterator_base<BucketsType, OtherValueType>& it) const noexcept
 		{
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			// Default constructed iterators must be allowed to compare and return equal (false, in this case).
-			SH_ROBINHOOD_ASSERT(get_buckets() == nullptr || get_buckets()->check_iterator_debug(get_index(), get_debug()));
-			SH_ROBINHOOD_ASSERT(it.get_buckets() == nullptr || it.get_buckets()->check_iterator_debug(it.get_index(), it.get_debug()));
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+			SH_ROBINHOOD_ASSERT(get_info() == nullptr || validate(), "Left-hand side of robinhood::iterator operator!= is no longer valid.");
+			SH_ROBINHOOD_ASSERT(it.get_info() == nullptr || it.validate(), "Right-hand side of robinhood::iterator operator!= is no longer valid.");
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			return get_index() != it.get_index();
 		}
 
 	protected:
-		template <typename OtherBucketsType>
+		template <typename OtherBucketsType, typename OtherValueType>
 		friend class iterator_base;
 
 		constexpr iterator_base(buckets_type* const buckets, const size_type index) noexcept
-			: m_buckets(buckets)
-			, m_index(index)
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			, m_debug(buckets != nullptr ? buckets->get_iterator_debug() : iterator_debug<size_type>{})
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
-		{ }
+			: buckets_info_type{ buckets ? buckets->get_buckets_info() : buckets_info_type{ false } }
+			, m_info{ buckets ? buckets->template get_info<void>() : nullptr }
+			, m_data{ buckets ? buckets->get_data() : nullptr }
+			, m_capacity{ buckets ? buckets->get_capacity() : 0 }
+			, m_index{ index }
+		{
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			const std::shared_ptr<iterator_validator_type> validator = buckets->get_iterator_validator();
+			SH_ROBINHOOD_ASSERT(validator != nullptr, "Initializing robinhood::iterator with null validator is unexpected.");
+			m_validator = validator;
+			m_generation = validator->get_generation();
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
+		}
 
 		/**	Return a reference to the value in buckets to which this iterator refers.
 		 *	@note Will return a constant reference if buckets_type is const. Will be a mutable reference otherwise.
@@ -2405,45 +2668,76 @@ namespace sh::robinhood
 		 */
 		constexpr auto& get_value() const noexcept
 		{
-			// Incrementing a default iterator is undefined behavior. Also, required for following asserts.
-			SH_ROBINHOOD_ASSERT(get_buckets() != nullptr);
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			SH_ROBINHOOD_ASSERT(get_buckets()->check_iterator_debug(get_index(), get_debug()));
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+			// Dereferencing a default iterator is undefined behavior. Also, required for following asserts.
+			SH_ROBINHOOD_ASSERT(get_data() != nullptr, "Attempting to get_value from default robinhood::iterator.");
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			SH_ROBINHOOD_ASSERT(validate(), "Attempting to get_value from robinhood::iterator that is no longer valid.");
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			// buckets_type::get_value will assert that index is within [0, capacity)
-			return get_buckets()->get_value(get_index());
+			return buckets_type::get_value(get_data(), get_buckets_info(), get_info(), get_index(), get_capacity());
 		}
-		constexpr buckets_type* get_buckets() const noexcept
+		constexpr const buckets_info_type& get_buckets_info() const noexcept
 		{
-			return m_buckets;
+			return static_cast<const buckets_info_type&>(*this);
+		}
+		constexpr const void* get_info() const noexcept
+		{
+			return m_info;
+		}
+		constexpr pointer get_data() const noexcept
+		{
+			return m_data;
+		}
+		constexpr size_type get_capacity() const noexcept
+		{
+			return m_capacity;
 		}
 		constexpr size_type get_index() const noexcept
 		{
 			return m_index;
 		}
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-		constexpr const iterator_debug<size_type>& get_debug() const noexcept
-		{
-			return m_debug;
-		}
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
 
-		/**	A pointer to the buckets container.
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+		bool validate() const
+		{
+			const std::shared_ptr<iterator_validator_type> validator = m_validator.lock();
+			return validator && validator->validate(m_index, m_capacity, m_generation);
+		}
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
+
+	private:
+		/**	A pointer to buckets info.
 		 *	@note Expected to only be nullptr if default initialized.
 		 */
-		buckets_type* m_buckets;
+		const void* m_info;
+
+		/**	A pointer to buckets data.
+		 *	@note Expected to only be nullptr if default initialized.
+		 */
+		pointer m_data;
+
+		/**	The count of items in m_data.
+		 *	@note If m_data is null, this should be zero.
+		 */
+		size_type m_capacity;
 
 		/**	A index of the item in the buckets container to which this iterator refers.
 		 *	@note If m_buckets is null, this should be zero.
 		 */
 		size_type m_index;
 
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-		/**	The iterator_debug information from construction or assignment. Used to verify if this iterator is canonically valid when used.
-		 *	@note If m_buckets is null, this should be zero-initialized.
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+		using iterator_validator_type = iterator_validator<std::remove_const_t<buckets_type>>;
+		using generation_type = typename iterator_validator_type::generation_type;
+
+		/**	The iterator validator information from buckets. Used to verify if this iterator is canonically valid when used.
 		 */
-		iterator_debug<size_type> m_debug;
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+		std::weak_ptr<iterator_validator_type> m_validator;
+
+		/**	The generation at the time of this iterator's creation. To be checked against the iterator validator.
+		 */
+		generation_type m_generation;
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 	};
 
 	template <typename HashTable, typename BucketsType>
@@ -2454,11 +2748,11 @@ namespace sh::robinhood
 	 *	@tparam BucketsType The type of the Robinhood buckets.
 	 */
 	template <typename HashTable, typename BucketsType>
-	class iterator : private iterator_base<BucketsType>
+	class iterator : private iterator_base<BucketsType, typename BucketsType::value_type>
 	{
 	private:
 		using hashtable_type = HashTable;
-		using base_type = iterator_base<BucketsType>;
+		using base_type = iterator_base<BucketsType, typename BucketsType::value_type>;
 		using typename base_type::buckets_type;
 
 	public:
@@ -2530,12 +2824,12 @@ namespace sh::robinhood
 	 *	@tparam BucketsType The type of the Robinhood buckets.
 	 */
 	template <typename HashTable, typename BucketsType>
-	class const_iterator : private iterator_base<const BucketsType>
+	class const_iterator : private iterator_base<const BucketsType, const typename BucketsType::value_type>
 	{
 	private:
 		using hashtable_type = HashTable;
 		using buckets_type = BucketsType;
-		using base_type = iterator_base<const BucketsType>;
+		using base_type = iterator_base<const BucketsType, const typename BucketsType::value_type>;
 		using const_buckets_type = typename base_type::buckets_type;
 
 	public:
@@ -2551,7 +2845,7 @@ namespace sh::robinhood
 		const_iterator(const const_iterator& other) = default;
 		const_iterator(const_iterator&& other) noexcept = default;
 		constexpr const_iterator(const iterator<hashtable_type, buckets_type>& other) noexcept
-			: base_type(other)
+			: base_type{ other }
 		{ }
 		const_iterator& operator=(const const_iterator& other) = default;
 		const_iterator& operator=(const_iterator&& other) noexcept = default;
@@ -2622,7 +2916,7 @@ namespace sh::robinhood
 		friend hashtable_type;
 
 		constexpr const_iterator(const_buckets_type& buckets, const size_type index) noexcept
-			: base_type(&buckets, index)
+			: base_type{ &buckets, index }
 		{ }
 	};
 
@@ -2699,79 +2993,87 @@ namespace sh::robinhood
 			noexcept(std::is_nothrow_constructible_v<key_equal>
 				&& std::is_nothrow_constructible_v<hasher>
 				&& std::is_nothrow_constructible_v<buckets_type, const allocator_type&>)
-			: key_equal()
-			, hasher()
-			, m_buckets(typename buckets_type::allocator_type(alloc))
-			, m_max_load_factor(default_load_factor)
-			, m_shift_bits(shift_bits<hash_result>(m_buckets.get_capacity()))
+			: key_equal{}
+			, hasher{}
+			, m_buckets{ typename buckets_type::allocator_type{ alloc } }
+			, m_max_load_factor{ default_load_factor }
+			, m_shift_bits{ shift_bits<hash_result>(m_buckets.get_capacity()) }
 		{ }
 		hashtable(const size_type bucket_count, const hasher& hash, const key_equal& equal, const allocator_type& alloc)
-			: key_equal(equal)
-			, hasher(hash)
-			, m_buckets(round_up_bucket_count(bucket_count), typename buckets_type::allocator_type(alloc))
-			, m_max_load_factor(default_load_factor)
-			, m_shift_bits(shift_bits<hash_result>(m_buckets.get_capacity()))
+			: key_equal{ equal }
+			, hasher{ hash }
+			, m_buckets{ round_up_bucket_count(bucket_count), typename buckets_type::allocator_type{ alloc } }
+			, m_max_load_factor{ default_load_factor }
+			, m_shift_bits{ shift_bits<hash_result>(m_buckets.get_capacity()) }
 		{ }
 		hashtable(const size_type bucket_count, const hasher& hash, const key_equal& equal)
-			: hashtable(bucket_count, hash, equal, allocator_type())
+			: hashtable{ bucket_count, hash, equal, allocator_type{} }
 		{ }
 		hashtable(const hashtable& other, const allocator_type& alloc)
-			: key_equal(other)
-			, hasher(other)
-			, m_buckets(other.m_buckets, typename buckets_type::allocator_type(alloc))
-			, m_max_load_factor(other.m_max_load_factor)
-			, m_shift_bits(other.m_shift_bits)
+			: key_equal{ other }
+			, hasher{ other }
+			, m_buckets{ other.m_buckets, typename buckets_type::allocator_type{ alloc } }
+			, m_max_load_factor{ other.m_max_load_factor }
+			, m_shift_bits{ other.m_shift_bits }
 		{ }
 		hashtable(const hashtable& other)
-			: key_equal(other)
-			, hasher(other)
-			, m_buckets(other.m_buckets)
-			, m_max_load_factor(other.m_max_load_factor)
-			, m_shift_bits(other.m_shift_bits)
+			: key_equal{ other }
+			, hasher{ other }
+			, m_buckets{ other.m_buckets }
+			, m_max_load_factor{ other.m_max_load_factor }
+			, m_shift_bits{ other.m_shift_bits }
 		{ }
 		hashtable(hashtable&& other, const allocator_type& alloc)
 			noexcept(std::is_nothrow_move_constructible_v<key_equal>
 				&& std::is_nothrow_move_constructible_v<hasher>
 				&& std::is_nothrow_constructible_v<typename buckets_type::allocator_type, const allocator_type&>
 				&& std::is_nothrow_constructible_v<buckets_type, buckets_type&&, typename buckets_type::allocator_type&&>)
-			: key_equal(std::move(other))
-			, hasher(std::move(other))
-			, m_buckets(std::move(other.m_buckets), typename buckets_type::allocator_type(alloc))
-			, m_max_load_factor(other.m_max_load_factor)
-			, m_shift_bits(std::exchange(other.m_shift_bits, shift_bits<hash_result>(other.m_buckets.get_capacity())))
+			: key_equal{ std::move(other) }
+			, hasher{ std::move(other) }
+			, m_buckets{ std::move(other.m_buckets), typename buckets_type::allocator_type{ alloc } }
+			, m_max_load_factor{ other.m_max_load_factor }
+			, m_shift_bits{ std::exchange(other.m_shift_bits, shift_bits<hash_result>(other.m_buckets.get_capacity())) }
 		{ }
 		hashtable(hashtable&& other)
 			noexcept(std::is_nothrow_move_constructible_v<key_equal>
 				&& std::is_nothrow_move_constructible_v<hasher>
 				&& std::is_nothrow_move_constructible_v<buckets_type>)
-			: key_equal(std::move(other))
-			, hasher(std::move(other))
-			, m_buckets(std::move(other.m_buckets))
-			, m_max_load_factor(other.m_max_load_factor)
-			, m_shift_bits(std::exchange(other.m_shift_bits, shift_bits<hash_result>(other.m_buckets.get_capacity())))
+			: key_equal{ std::move(other) }
+			, hasher{ std::move(other) }
+			, m_buckets{ std::move(other.m_buckets) }
+			, m_max_load_factor{ other.m_max_load_factor }
+			, m_shift_bits{ std::exchange(other.m_shift_bits, shift_bits<hash_result>(other.m_buckets.get_capacity())) }
 		{ }
 		~hashtable() = default;
 
 		hashtable& operator=(const hashtable& other)
 		{
-			this->key_equal::operator=(other);
-			this->hasher::operator=(other);
-			m_buckets = other.m_buckets;
-			m_max_load_factor = other.m_max_load_factor;
-			m_shift_bits = other.m_shift_bits;
+			// buckets::replace_values_from_same_sized_buckets & functions called within require that this != other (via
+			// buckets::operator= -> copy_replace_values_from_same_sized_buckets -> replace_values_from_same_sized_buckets).
+			if SH_ROBINHOOD_LIKELY(this != &other)
+			{
+				this->key_equal::operator=(other);
+				this->hasher::operator=(other);
+				m_buckets = other.m_buckets;
+				m_max_load_factor = other.m_max_load_factor;
+				m_shift_bits = other.m_shift_bits;
+			}
 			return *this;
 		}
 		hashtable& operator=(hashtable&& other)
 			noexcept(std::is_nothrow_move_assignable_v<buckets_type>)
 		{
-			// Move buckets first. That way, if it throws, the other values are left intact.
-			m_buckets = std::move(other.m_buckets);
-			static_assert(std::is_nothrow_move_assignable_v<key_equal>, "key_equal must have noexcept move assignment operation.");
-			this->key_equal::operator=(std::move(other));
-			static_assert(std::is_nothrow_move_assignable_v<hasher>, "hasher must have noexcept move assignment operation.");
-			this->hasher::operator=(std::move(other));
-			m_max_load_factor = other.m_max_load_factor;
-			m_shift_bits = std::exchange(other.m_shift_bits, shift_bits<hash_result>(other.m_buckets.get_capacity()));
+			if SH_ROBINHOOD_LIKELY(this != &other)
+			{
+				// Move buckets first. That way, if it throws, the other values are left intact.
+				m_buckets = std::move(other.m_buckets);
+				static_assert(std::is_nothrow_move_assignable_v<key_equal>, "key_equal must have noexcept move assignment operation.");
+				this->key_equal::operator=(std::move(other));
+				static_assert(std::is_nothrow_move_assignable_v<hasher>, "hasher must have noexcept move assignment operation.");
+				this->hasher::operator=(std::move(other));
+				m_max_load_factor = other.m_max_load_factor;
+				m_shift_bits = std::exchange(other.m_shift_bits, shift_bits<hash_result>(other.m_buckets.get_capacity()));
+			}
 			return *this;
 		}
 		allocator_type get_allocator() const
@@ -2809,7 +3111,7 @@ namespace sh::robinhood
 		}
 		constexpr size_type bucket_size(const size_type n) const noexcept
 		{
-			SH_ROBINHOOD_ASSERT(n < m_buckets.get_capacity());
+			SH_ROBINHOOD_ASSERT(n < m_buckets.get_capacity(), "robinhood::hashtable::bucket_size called with index at or beyond capacity.");
 			return m_buckets.with_info([n](const auto* const info) noexcept -> size_type
 			{
 				return info[n].empty() ? 0 : 1;
@@ -2840,7 +3142,7 @@ namespace sh::robinhood
 
 		constexpr size_type get_index(const const_iterator pos) const noexcept
 		{
-			SH_ROBINHOOD_ASSERT(&m_buckets == pos.get_buckets());
+			SH_ROBINHOOD_ASSERT(&m_buckets == pos.get_buckets(), "robinhood::hashtable::get_index called with iterator from a different hashtable.");
 			return pos.get_index();
 		}
 		constexpr iterator index(const size_type n) noexcept
@@ -2853,10 +3155,11 @@ namespace sh::robinhood
 		}
 		constexpr iterator begin() noexcept
 		{
-			return index(m_buckets.with_info([this](const auto* const info) noexcept -> size_type
+			return index(m_buckets.with_info([this](const auto* const SH_ROBINHOOD_RESTRICT info) noexcept -> size_type
 			{
+				const size_type capacity{ this->m_buckets.get_capacity() };
 				size_type index = 0;
-				while (index != m_buckets.get_capacity() && info[index].empty())
+				while (index != capacity && info[index].empty())
 				{
 					++index;
 				}
@@ -2869,10 +3172,11 @@ namespace sh::robinhood
 		}
 		constexpr const_iterator begin() const noexcept
 		{
-			return index(m_buckets.with_info([this](const auto* const info) noexcept -> size_type
+			return index(m_buckets.with_info([this](const auto* const SH_ROBINHOOD_RESTRICT info) noexcept -> size_type
 			{
+				const size_type capacity{ this->m_buckets.get_capacity() };
 				size_type index = 0;
-				while (index != m_buckets.get_capacity() && info[index].empty())
+				while (index != capacity && info[index].empty())
 				{
 					++index;
 				}
@@ -2915,7 +3219,7 @@ namespace sh::robinhood
 		}
 		void rehash(size_type new_bucket_count)
 		{
-			const size_type min_bucket_count = size() / max_load_factor();
+			const size_type min_bucket_count = size_type(size() / max_load_factor());
 			new_bucket_count = round_up_bucket_count(std::max(new_bucket_count, min_bucket_count));
 			if (new_bucket_count != bucket_count())
 			{
@@ -2985,46 +3289,54 @@ namespace sh::robinhood
 		 */
 		void do_rehash_larger(const size_type new_bucket_count)
 		{
-			SH_ROBINHOOD_ASSERT(new_bucket_count >= m_buckets.get_capacity());
+			SH_ROBINHOOD_ASSERT(new_bucket_count >= m_buckets.get_capacity(), "robinhood::hashtable::do_rehash_larger expects a new_bucket_count of at least the current capacity.");
 
 			// If wide, pessimisticly assume that whatever horrible anomaly resulted in going wide before will remain or
 			// could happen again post-rehash.
-			buckets_type new_buckets(new_bucket_count, m_buckets.get_wide(), m_buckets.get_allocator());
-			const bits_type new_shift_bits = shift_bits<hash_result>(new_bucket_count);
+			buckets_type new_buckets{ new_bucket_count, m_buckets.get_wide(), m_buckets.get_allocator() };
+			const bits_type new_shift_bits{ shift_bits<hash_result>(new_bucket_count) };
 
+#ifdef _MSC_VER
+			// MSVC requires an explicit capture of constexpr use_move or static storage.
+			static
+#endif // _MSC_VER
 			// If it's safe, use move operations for a "fast path".
 			constexpr bool use_move = std::is_nothrow_move_constructible_v<mutable_value_type>
 				&& std::is_nothrow_move_assignable_v<buckets_type>;
 
 			// If rehashing to a larger size, narrow info should never need to widen. This is only true as long as power-
 			// of-two sizes & a shifting type of hash_clamp are used.
-			m_buckets.with_info([this, &new_buckets, new_shift_bits](const auto* const info)
+			m_buckets.with_info(
+				[this
+				, &new_buckets
+				, new_shift_bits
+				](const auto* const SH_ROBINHOOD_RESTRICT info)
 			{
 				using info_type = std::decay_t<decltype(*info)>;
-				auto* const new_info = new_buckets.template get_info<info_type>();
-				const size_type capacity = m_buckets.get_capacity();
+				auto* const SH_ROBINHOOD_RESTRICT new_info = new_buckets.template get_info<info_type>();
+				const size_type capacity{ this->m_buckets.get_capacity() };
 				for (size_type index = 0; index < capacity; ++index)
 				{
 					if (info[index].empty() == false)
 					{
-						mutable_value_type& value = m_buckets.get_value(index);
+						mutable_value_type& value = this->m_buckets.get_value(index);
 						// hasher cannot safely throw here, but not all are marked noexcept!
 						const hash_result hash = static_cast<const hasher&>(*this)(value.key());
-						const size_type dst = hash_clamp(hash, new_shift_bits);
+						const size_type dst = size_type(hash_clamp(hash, new_shift_bits));
 						if constexpr (use_move)
 						{
 							// The fast path here, if move construction and bucket move assignment are noexcept:
-							do_emplace(new_buckets, new_info, std::move(value), info_type(1, hash), dst);
+							this->do_emplace(new_buckets, new_info, std::move(value), info_type(1, hash), dst);
 							// Destruct value now, so that we don't have to reiterate over m_buckets when it's move
 							// assigned below.
-							m_buckets.destroy(value);
+							this->m_buckets.destroy(value);
 						}
 						else
 						{
 							// If there's a possibility of mutable_value_type move construction throwing an exception, pass by
 							// copy. This way the previous location (value) is still intact in m_buckets if an exception is
 							// thrown and we avoid the rewind (which could throw again!).
-							do_emplace(new_buckets, new_info, mutable_value_type(value), info_type(1, hash), dst);
+							this->do_emplace(new_buckets, new_info, mutable_value_type(value), info_type(1, hash), dst);
 						}
 					}
 				}
@@ -3035,7 +3347,7 @@ namespace sh::robinhood
 				// Since the fast path was taken above, all buckets are already destructed; mark m_buckets as such.
 				m_buckets.mark_count_zero_to_indicate_all_destroyed();
 			}
-			// Move assignment will invalidate iterators.
+			// Move assignment will invalidate iterators when necessary.
 			m_buckets = std::move(new_buckets);
 			m_shift_bits = new_shift_bits;
 		}
@@ -3044,12 +3356,12 @@ namespace sh::robinhood
 		 */
 		void do_rehash_smaller(const size_type new_bucket_count)
 		{
-			SH_ROBINHOOD_ASSERT(new_bucket_count < m_buckets.get_capacity());
+			SH_ROBINHOOD_ASSERT(new_bucket_count < m_buckets.get_capacity(), "robinhood::hashtable::do_rehash_smaller expects a new_bucket_count less than the current capacity.");
 
 			// If wide, pessimisticly assume that whatever horrible anomaly resulted in going wide before will remain or
 			// could happen again post-rehash.
-			buckets_type new_buckets(new_bucket_count, m_buckets.get_wide(), m_buckets.get_allocator());
-			const bits_type new_shift_bits = shift_bits<hash_result>(new_bucket_count);
+			buckets_type new_buckets{ new_bucket_count, m_buckets.get_wide(), m_buckets.get_allocator() };
+			const bits_type new_shift_bits{ shift_bits<hash_result>(new_bucket_count) };
 
 			// Rewinding requires that move construction can't throw _again_.
 			static_assert(std::is_nothrow_move_constructible_v<mutable_value_type>, "rehash rewind unsupported without noexcept move constructor for mutable_value_type.");
@@ -3060,23 +3372,23 @@ namespace sh::robinhood
 			// In that case, we'll handle the exception by rewinding new_buckets back into m_buckets before propagating.
 			try
 			{
-				m_buckets.with_info([this, &new_buckets, new_shift_bits](auto* const info)
+				m_buckets.with_info([this, &new_buckets, new_shift_bits](auto* const SH_ROBINHOOD_RESTRICT info)
 				{
-					const size_type capacity = m_buckets.get_capacity();
+					const size_type capacity{ this->m_buckets.get_capacity() };
 					for (size_type index = 0; index < capacity; ++index)
 					{
 						if (info[index].empty() == false)
 						{
-							mutable_value_type& value = m_buckets.get_value(index);
+							mutable_value_type& value = this->m_buckets.get_value(index);
 							// hasher can safely throw here, even though it shouldn't ever happen.
 							const hash_result hash = static_cast<const hasher&>(*this)(value.key());
-							const size_type dst = hash_clamp(hash, new_shift_bits);
-							do_emplace(new_buckets, std::move(value), wide_info_type(1, hash), dst);
+							const size_type dst = size_type(hash_clamp(hash, new_shift_bits));
+							this->do_emplace(new_buckets, std::move(value), wide_info_type(1, hash), dst);
 							// Erase value now, so that:
 							//   a. If there's an exception thrown, we can do_emplace back into this spot. This is why we
 							//      cannot just use m_buckets.destroy(value).
 							//   b. Count will be zero and m_buckets can avoid iterating over all values when assigned below.
-							m_buckets.erase(info, index);
+							this->m_buckets.erase(info, index);
 						}
 					}
 				});
@@ -3084,12 +3396,12 @@ namespace sh::robinhood
 			catch (...)
 			{
 				// Rewind.
-				m_buckets.with_info([this, &new_buckets](auto* const info)
+				m_buckets.with_info([this, &new_buckets](auto* const SH_ROBINHOOD_RESTRICT info)
 				{
 					using info_type = std::decay_t<decltype(*info)>;
-					new_buckets.with_info([this, &new_buckets, info](const auto* const new_info)
+					new_buckets.with_info([this, &new_buckets, info](const auto* const SH_ROBINHOOD_RESTRICT new_info)
 					{
-						const size_type new_capacity = new_buckets.get_capacity();
+						const size_type new_capacity{ new_buckets.get_capacity() };
 						for (size_type index = 0; index < new_capacity; ++index)
 						{
 							if (new_info[index].empty() == false)
@@ -3097,14 +3409,14 @@ namespace sh::robinhood
 								mutable_value_type& value = new_buckets.get_value(index);
 								// hasher cannot safely throw here, but not all are marked noexcept!
 								const hash_result hash = static_cast<const hasher&>(*this)(value.key());
-								const size_type dst = hash_clamp_with_shift_bits(hash);
+								const size_type dst{ this->hash_clamp_with_shift_bits(hash) };
 								// This is expected to never throw:
 								//   a. We know there's an empty place, we made it above in the "try" with erase.
 								//	 b. We're not going to widen and it's explicitly disabled: value_temp came out
 								//      of m_buckets with the current info_type, it should be able to go back in!
 								constexpr bool can_widen = false;
 								constexpr typename info_type::distance_type initial_distance = 1;
-								do_emplace<info_type, can_widen>(m_buckets, info, std::move(value), info_type(initial_distance, hash), dst);
+								this->do_emplace<info_type, can_widen>(this->m_buckets, info, std::move(value), info_type(initial_distance, hash), dst);
 								// Destruct value now, so that we can get away with mark_count_zero_to_indicate_all_destroyed
 								// and won't have to reiterate over new_buckets when it's destructed below.
 								new_buckets.destroy(value);
@@ -3116,7 +3428,7 @@ namespace sh::robinhood
 				// Propagate exception.
 				throw;
 			}
-			// Success. This move assignment will invalidate iterators.
+			// Success. This move assignment will invalidate iterators when necessary.
 			m_buckets = std::move(new_buckets);
 			m_shift_bits = new_shift_bits;
 		}
@@ -3153,7 +3465,7 @@ namespace sh::robinhood
 
 				// hasher cannot safely throw here, but not all are marked noexcept!
 				const hash_result hash = static_cast<const hasher&>(*this)(value_temp.key());
-				const size_type dst = hash_clamp_with_shift_bits(hash);
+				const size_type dst{ hash_clamp_with_shift_bits(hash) };
 				// This is expected to never throw:
 				//   a. We know there's an empty place, we just made it above with do_erase.
 				//	 b. We're not going to widen and it's explicitly disabled: value_temp
@@ -3173,8 +3485,8 @@ namespace sh::robinhood
 		 */
 		void do_widen_or_rewind_one_and_throw(const size_type result_index, buckets_type& buckets, mutable_value_type& value_temp) const
 		{
-			static_assert(policy_type::constant_width == false);
-			SH_ROBINHOOD_ASSERT(buckets.get_wide() == false);
+			static_assert(policy_type::constant_width == false, "robinhood::hashtable::do_widen_or_rewind_one_and_throw cannot widen with a constant width policy.");
+			SH_ROBINHOOD_ASSERT(buckets.get_wide() == false, "robinhood::hashtable::do_widen_or_rewind_one_and_throw expects buckets to not already be widened.");
 			try
 			{
 				// Asserts that constant_width == false and that buckets' info is currently narrow.
@@ -3202,13 +3514,13 @@ namespace sh::robinhood
 		 */
 		emplace_result do_widen_and_continue_emplace(const size_type initial_index, size_type result_index, buckets_type& buckets, mutable_value_type& value_temp, wide_info_type info_temp, const size_type midpoint_index) const
 		{
-			static_assert(policy_type::constant_width == false);
-			SH_ROBINHOOD_ASSERT(buckets.get_wide() == false);
+			static_assert(policy_type::constant_width == false, "robinhood::hashtable::do_widen_and_continue_emplace cannot widen with a constant width policy.");
+			SH_ROBINHOOD_ASSERT(buckets.get_wide() == false, "robinhood::hashtable::do_widen_and_continue_emplace expects buckets to not already be widened.");
 
 			// Will throw on failure, after rewinding & re-emplacing value_temp.
 			do_widen_or_rewind_one_and_throw(result_index, buckets, value_temp);
 
-			const size_type capacity = buckets.get_capacity();
+			const size_type capacity{ buckets.get_capacity() };
 			wide_info_type* const wide_info = buckets.template get_info<wide_info_type>();
 			SH_ROBINHOOD_ASSERT(info_temp.get_distance() < max_info_distance<wide_info_type>());
 			info_temp.push_forward();
@@ -3218,8 +3530,8 @@ namespace sh::robinhood
 			if (initial_index >= midpoint_index)
 			{
 				// Relies on an empty info element at buckets[capacity]
-				static_assert(buckets_type::info_tail > 0);
-				SH_ROBINHOOD_ASSERT(wide_info[capacity].empty());
+				static_assert(buckets_type::info_tail > 0, "robinhood::hashtable::do_widen_and_continue_emplace expects the presence of an info tail.");
+				SH_ROBINHOOD_ASSERT(wide_info[capacity].empty(), "robinhood::hashtable::do_widen_and_continue_emplace expects the info tail to be empty.");
 				for (size_type index = initial_index + 1; /*index != capacity*/; ++index)
 				{
 					if (wide_info[index].empty())
@@ -3257,7 +3569,7 @@ namespace sh::robinhood
 				// Assumption made here that there must be an empty bucket before midpoint:
 				for (size_type index = 0; /*index != midpoint_index*/; ++index)
 				{
-					SH_ROBINHOOD_ASSERT(index < midpoint_index);
+					SH_ROBINHOOD_ASSERT(index < midpoint_index, "robinhood::hashtable::do_widen_and_continue_emplace did not expect to reach midpoint_index.");
 					if (wide_info[index].empty())
 					{
 						static_assert(std::is_nothrow_move_constructible_v<mutable_value_type>, "mutable_value_type excepted to have noexcept move constructor.");
@@ -3288,7 +3600,7 @@ namespace sh::robinhood
 				// Assumption made here that there must be an empty bucket before midpoint:
 				for (size_type index = initial_index + 1; /*index != midpoint_index*/; ++index)
 				{
-					SH_ROBINHOOD_ASSERT(index < midpoint_index);
+					SH_ROBINHOOD_ASSERT(index < midpoint_index, "robinhood::hashtable::do_widen_and_continue_emplace did not expect to reach midpoint_index.");
 					if (wide_info[index].empty())
 					{
 						static_assert(std::is_nothrow_move_constructible_v<mutable_value_type>, "mutable_value_type excepted to have noexcept move constructor.");
@@ -3314,7 +3626,7 @@ namespace sh::robinhood
 					info_temp.push_forward();
 				}
 			}
-			SH_ROBINHOOD_ASSERT(result_index != capacity);
+			SH_ROBINHOOD_ASSERT(result_index != capacity, "robinhood::hashtable::do_widen_and_continue_emplace is returning an invalid result index as emplaced.");
 			return { result_index };
 		}
 
@@ -3333,12 +3645,12 @@ The type of Robinhood info being used by buckets.
 		template <typename InfoType, bool CanWiden = policy_type::constant_width == false && std::is_same_v<InfoType, wide_info_type> == false>
 		emplace_result do_emplace(buckets_type& buckets, InfoType* const info, mutable_value_type&& value_temp, InfoType info_temp, const size_type midpoint_index) const
 		{
-			const size_type capacity = buckets.get_capacity();
-			size_type result_index = capacity;
+			const size_type capacity{ buckets.get_capacity() };
+			size_type result_index{ capacity };
 			SH_ROBINHOOD_ASSERT(info_temp.get_distance() > 0);
 			// Relies on an empty info element at buckets[capacity]
-			static_assert(buckets_type::info_tail > 0);
-			SH_ROBINHOOD_ASSERT(info[capacity].empty());
+			static_assert(buckets_type::info_tail > 0, "robinhood::hashtable::do_emplace expects the presence of an info tail.");
+			SH_ROBINHOOD_ASSERT(info[capacity].empty(), "robinhood::hashtable::do_emplace expects the info tail to be empty.");
 			for (size_type index = midpoint_index; /*index != capacity*/; ++index)
 			{
 				if (info[index].empty())
@@ -3383,7 +3695,7 @@ The type of Robinhood info being used by buckets.
 			// Assumption made here that there must be an empty bucket before midpoint:
 			for (size_type index = 0; /*index != midpoint_index*/; ++index)
 			{
-				SH_ROBINHOOD_ASSERT(index < midpoint_index);
+				SH_ROBINHOOD_ASSERT(index < midpoint_index, "robinhood::hashtable::do_emplace did not expect to reach midpoint_index.");
 				if (info[index].empty())
 				{
 					static_assert(std::is_nothrow_move_constructible_v<mutable_value_type>, "mutable_value_type excepted to have noexcept move constructor.");
@@ -3415,7 +3727,7 @@ The type of Robinhood info being used by buckets.
 				}
 				info_temp.push_forward();
 			}
-			SH_ROBINHOOD_ASSERT(result_index != capacity);
+			SH_ROBINHOOD_ASSERT(result_index != capacity, "robinhood::hashtable::do_emplace is returning an invalid result index as emplaced.");
 			return { result_index };
 		}
 
@@ -3465,21 +3777,29 @@ The type of Robinhood info being used by buckets.
 		emplace_result do_emplace(wide_info_type info_temp, size_type midpoint_index, Args&&... args)
 		{
 			// A throw during construction is allowed as this & m_buckets haven't been modified at this point.
-			mutable_value_type value_temp(std::forward<Args>(args)...);
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
+			mutable_value_type value_temp{ std::forward<Args>(args)... };
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			// Invalidate iterators on emplace. Do it once here rather than multiple times in buckets::emplace.
 			m_buckets.invalidate_iterators();
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			if SH_ROBINHOOD_UNLIKELY(load_factor_with_given_size_current_capacity(size() + 1) > m_max_load_factor)
 			{
-				// Rehash from zero to default_bucket_count other to twice the current size.
-				const size_type current_capacity = m_buckets.get_capacity();
-				const size_type desired_capacity = current_capacity == 0
-					? default_bucket_count
-					: (current_capacity << 1u);
+				// Rehash from zero to default_bucket_count or to twice the current size.
+				const size_type current_capacity{ m_buckets.get_capacity() };
+				const size_type desired_capacity{ current_capacity == 0
+					? size_type{ default_bucket_count }
+					: size_type(current_capacity << 1u)
+				};
 
-				// do_rehash_larger may throw.
-				do_rehash_larger(desired_capacity);
+				if SH_ROBINHOOD_LIKELY(desired_capacity > current_capacity)
+				{
+					// do_rehash_larger may throw.
+					do_rehash_larger(desired_capacity);
+				}
+				else if SH_ROBINHOOD_UNLIKELY(size() == current_capacity)
+				{
+					throw std::length_error("Maximum capacity has been filled.");
+				}
 
 				// hasher can safely throw here, even though it shouldn't ever happen.
 				const hash_result hash = static_cast<const hasher&>(*this)(value_temp.key());
@@ -3499,12 +3819,12 @@ The type of Robinhood info being used by buckets.
 		template <typename InfoType>
 		static void do_erase(buckets_type& buckets, InfoType* const info, const size_type pos_index) noexcept
 		{
-			const size_type capacity = buckets.get_capacity();
-			size_type last = pos_index;
+			const size_type capacity{ buckets.get_capacity() };
+			size_type last{ pos_index };
 			buckets.erase(info, last);
 			// Relies on an empty info element at buckets[capacity]
-			static_assert(buckets_type::info_tail > 0);
-			SH_ROBINHOOD_ASSERT(info[capacity].empty());
+			static_assert(buckets_type::info_tail > 0, "robinhood::hashtable::do_erase expects the presence of an info tail.");
+			SH_ROBINHOOD_ASSERT(info[capacity].empty(), "robinhood::hashtable::do_erase expects the info tail to be empty.");
 			for (size_type index = last + 1; /*index != capacity*/; ++index)
 			{
 				static_assert(empty_distance_v<typename InfoType::distance_type> <= 1,
@@ -3531,7 +3851,7 @@ The type of Robinhood info being used by buckets.
 			// stopping condition in this loop.
 			for (size_type index = 0; /*index != pos_index*/; ++index)
 			{
-				SH_ROBINHOOD_ASSERT(index <= pos_index || info[index].empty());
+				SH_ROBINHOOD_ASSERT(index <= pos_index || info[index].empty(), "robinhood::hashtable::do_erase did not expect to reach a non-empty pos_index.");
 				static_assert(empty_distance_v<typename InfoType::distance_type> <= 1,
 					"The result of get_distance() when empty() is true must compare as less-than 1.");
 				if (info[index].get_distance() <= 1)
@@ -3553,18 +3873,19 @@ The type of Robinhood info being used by buckets.
 		 */
 		void do_erase(const const_iterator& pos) noexcept
 		{
-			SH_ROBINHOOD_ASSERT(pos.m_buckets == &m_buckets);
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			SH_ROBINHOOD_ASSERT(m_buckets.check_iterator_debug(pos.m_index, pos.m_debug));
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
-			m_buckets.with_info([this, index = pos.m_index](auto* const info)
+			SH_ROBINHOOD_ASSERT(pos.get_data() == m_buckets.get_data(), "robinhood::hashtable::do_erase given an iterator from another hashtable.");
+			SH_ROBINHOOD_ASSERT(pos.get_info() == m_buckets.template get_info<void>(), "robinhood::hashtable::do_erase given an iterator from another hashtable.");
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			SH_ROBINHOOD_ASSERT(pos.validate(), "robinhood::hashtable::do_erase given an iterator that is not longer valid.");
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			m_buckets.with_info([this, index = pos.get_index()](auto* const info)
 			{
 				do_erase(m_buckets, info, index);
 			});
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			// Invalidate iterators on erase.
 			m_buckets.invalidate_iterators();
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 		}
 		/**	Erase a range of iterators [first, last) from m_buckets.
 		 *	@param first The first iterator to erase.
@@ -3572,13 +3893,20 @@ The type of Robinhood info being used by buckets.
 		 */
 		void do_erase(const const_iterator& first, const const_iterator& last) noexcept
 		{
-			SH_ROBINHOOD_ASSERT(first.m_buckets == &m_buckets);
-			SH_ROBINHOOD_ASSERT(last.m_buckets == &m_buckets);
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			SH_ROBINHOOD_ASSERT(m_buckets.check_iterator_debug(first.m_index, first.m_debug));
-			SH_ROBINHOOD_ASSERT(m_buckets.check_iterator_debug(last.m_index, last.m_debug));
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
-			if (first != last)
+			SH_ROBINHOOD_ASSERT(first.get_data() == m_buckets.get_data(), "robinhood::hashtable::do_erase given a first iterator from another hashtable.");
+			SH_ROBINHOOD_ASSERT(last.get_data() == m_buckets.get_data(), "robinhood::hashtable::do_erase given a last iterator from another hashtable.");
+			SH_ROBINHOOD_ASSERT(first.get_info() == m_buckets.template get_info<void>(), "robinhood::hashtable::do_erase given a first iterator from another hashtable.");
+			SH_ROBINHOOD_ASSERT(last.get_info() == m_buckets.template get_info<void>(), "robinhood::hashtable::do_erase given a last iterator from another hashtable.");
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			SH_ROBINHOOD_ASSERT(first.validate(), "robinhood::hashtable::do_erase given a first iterator that is not longer valid.");
+			SH_ROBINHOOD_ASSERT(last.validate(), "robinhood::hashtable::do_erase given a last iterator that is not longer valid.");
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			if (first.get_index() == 0 && last.get_index() == m_buckets.get_capacity())
+			{
+				// Iterators invalidated in clear.
+				m_buckets.clear();
+			}
+			else if SH_ROBINHOOD_LIKELY(first != last)
 			{
 				// Erasing a range with this Robinhood table is tricky:
 				//   a. The last iterator -- unless it's end -- will not remain
@@ -3593,14 +3921,14 @@ The type of Robinhood info being used by buckets.
 				//     i.  Count the number of non-empty entries between [first,
 				//         last).
 				//     ii. Starting at first, delete that number of entries.
-				m_buckets.with_info([this, left = first.m_index, right = last.m_index](auto* const info)
+				m_buckets.with_info([this, left = first.get_index(), right = last.get_index()](auto* const SH_ROBINHOOD_RESTRICT info)
 				{
 					// Ascertain iterator validity. Left cannot equal capacity (end) as passed first != last
 					// condition above unless right is invalid itself.
-					SH_ROBINHOOD_ASSERT(left < m_buckets.get_capacity());
-					SH_ROBINHOOD_ASSERT(info[left].empty() == false);
-					SH_ROBINHOOD_ASSERT(right <= m_buckets.get_capacity());
-					SH_ROBINHOOD_ASSERT(right == m_buckets.get_capacity() || info[right].empty() == false);
+					SH_ROBINHOOD_ASSERT(left < m_buckets.get_capacity(), "robinhood::hashtable::do_erase given a first iterator at or beyond capacity.");
+					SH_ROBINHOOD_ASSERT(info[left].empty() == false, "robinhood::hashtable::do_erase given a first iterator referencing an empty index.");
+					SH_ROBINHOOD_ASSERT(right <= m_buckets.get_capacity(), "robinhood::hashtable::do_erase given a last iterator beyond capacity.");
+					SH_ROBINHOOD_ASSERT(right == m_buckets.get_capacity() || info[right].empty() == false, "robinhood::robinhood::do_erase given a last iterator at capacity that isn't empty.");
 					// As given iterators must be valid, left cannot be empty.
 					size_type to_erase = 1;
 					for (size_type index = left + 1; index < right; ++index)
@@ -3620,16 +3948,16 @@ The type of Robinhood info being used by buckets.
 						while (info[index].empty())
 						{
 							++index;
-							SH_ROBINHOOD_ASSERT(index < m_buckets.get_capacity());
+							SH_ROBINHOOD_ASSERT(index < m_buckets.get_capacity(), "robinhood::hashtable::do_erase didn't expect index to reach capacity.");
 						}
 						do_erase(m_buckets, info, index);
 						++erased;
 					};
 				});
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
 				// Invalidate iterators on erase.
 				m_buckets.invalidate_iterators();
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			}
 		}
 		/**	Erase an iterator from m_buckets and return the next iterator.
@@ -3638,14 +3966,15 @@ The type of Robinhood info being used by buckets.
 		 */
 		iterator do_erase_continue(const const_iterator& pos) noexcept
 		{
-			SH_ROBINHOOD_ASSERT(pos.m_buckets == &m_buckets);
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			SH_ROBINHOOD_ASSERT(m_buckets.check_iterator_debug(pos.m_index, pos.m_debug));
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
-			const auto result = m_buckets.with_info([this, pos_index = pos.m_index](auto* const info) -> size_type
+			SH_ROBINHOOD_ASSERT(pos.get_data() == m_buckets.get_data(), "robinhood::hashtable::do_erase_continue given an iterator from another hashtable.");
+			SH_ROBINHOOD_ASSERT(pos.get_info() == m_buckets.template get_info<void>(), "robinhood::hashtable::do_erase_continue given an iterator from another hashtable.");
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			SH_ROBINHOOD_ASSERT(pos.validate(), "robinhood::hashtable::do_erase_continue given an iterator that is not longer valid.");
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			const auto result = m_buckets.with_info([this, pos_index = pos.get_index()](auto* const SH_ROBINHOOD_RESTRICT info) -> size_type
 			{
 				do_erase(m_buckets, info, pos_index);
-				const size_type capacity = m_buckets.get_capacity();
+				const size_type capacity{ m_buckets.get_capacity() };
 				for (size_type index = pos_index; index < capacity; ++index)
 				{
 					if (info[index].empty() == false)
@@ -3655,10 +3984,10 @@ The type of Robinhood info being used by buckets.
 				}
 				return capacity;
 			});
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			// Invalidate iterators on erase.
 			m_buckets.invalidate_iterators();
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 			return index(result);
 		}
 		/**	Erase a range of iterators [first, last) from m_buckets.
@@ -3668,16 +3997,24 @@ The type of Robinhood info being used by buckets.
 		 */
 		iterator do_erase_continue(const const_iterator& first, const const_iterator& last) noexcept
 		{
-			SH_ROBINHOOD_ASSERT(first.m_buckets == &m_buckets);
-			SH_ROBINHOOD_ASSERT(last.m_buckets == &m_buckets);
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
-			SH_ROBINHOOD_ASSERT(m_buckets.check_iterator_debug(first.m_index, first.m_debug));
-			SH_ROBINHOOD_ASSERT(m_buckets.check_iterator_debug(last.m_index, last.m_debug));
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
-			if (first == last)
+			SH_ROBINHOOD_ASSERT(first.get_data() == m_buckets.get_data(), "robinhood::hashtable::do_erase_continue given a first iterator from another hashtable.");
+			SH_ROBINHOOD_ASSERT(last.get_data() == m_buckets.get_data(), "robinhood::hashtable::do_erase_continue given a last iterator from another hashtable.");
+			SH_ROBINHOOD_ASSERT(first.get_info() == m_buckets.template get_info<void>(), "robinhood::hashtable::do_erase_continue given a first iterator from another hashtable.");
+			SH_ROBINHOOD_ASSERT(last.get_info() == m_buckets.template get_info<void>(), "robinhood::hashtable::do_erase_continue given a last iterator from another hashtable.");
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			SH_ROBINHOOD_ASSERT(first.validate(), "robinhood::hashtable::do_erase_continue given a first iterator that is not longer valid.");
+			SH_ROBINHOOD_ASSERT(last.validate(), "robinhood::hashtable::do_erase_continue given a last iterator that is not longer valid.");
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
+			if (first.get_index() == 0 && last.get_index() == m_buckets.get_capacity())
+			{
+				// Iterators invalidated in clear.
+				m_buckets.clear();
+				return end();
+			}
+			else if SH_ROBINHOOD_UNLIKELY(first == last)
 			{
 				// No erase done, no iterator invalidation necessary.
-				return index(last.m_index);
+				return index(last.get_index());
 			}
 			else
 			{
@@ -3694,15 +4031,15 @@ The type of Robinhood info being used by buckets.
 				//     i.  Count the number of non-empty entries between [first,
 				//         last).
 				//     ii. Starting at first, delete that number of entries.
-				const size_type result = m_buckets.with_info([this, left = first.m_index, right = last.m_index](auto* const info) -> size_type
+				const size_type result{ m_buckets.with_info([this, left = first.get_index(), right = last.get_index()](auto* const SH_ROBINHOOD_RESTRICT info) -> size_type
 				{
-					const size_type capacity = m_buckets.get_capacity();
+					const size_type capacity{ m_buckets.get_capacity() };
 					// Ascertain iterator validity. Left cannot equal capacity (end) as passed first != last
 					// condition above unless right is invalid itself.
-					SH_ROBINHOOD_ASSERT(left < capacity);
-					SH_ROBINHOOD_ASSERT(info[left].empty() == false);
-					SH_ROBINHOOD_ASSERT(right <= capacity);
-					SH_ROBINHOOD_ASSERT(right == capacity || info[right].empty() == false);
+					SH_ROBINHOOD_ASSERT(left < capacity, "robinhood::hashtable::do_erase_continue given a first iterator at or beyond capacity.");
+					SH_ROBINHOOD_ASSERT(info[left].empty() == false, "robinhood::hashtable::do_erase_continue given a first iterator referencing an empty index.");
+					SH_ROBINHOOD_ASSERT(right <= capacity, "robinhood::hashtable::do_erase_continue given a last iterator beyond capacity.");
+					SH_ROBINHOOD_ASSERT(right == capacity || info[right].empty() == false, "robinhood::robinhood::do_erase_continue given a last iterator at capacity that isn't empty.");
 					// As given iterators must be valid, left cannot be empty.
 					size_type to_erase = 1;
 					for (size_type index = left + 1; index < right; ++index)
@@ -3722,7 +4059,7 @@ The type of Robinhood info being used by buckets.
 						while (info[index].empty())
 						{
 							++index;
-							SH_ROBINHOOD_ASSERT(index < capacity);
+							SH_ROBINHOOD_ASSERT(index < capacity, "robinhood::hashtable::do_erase didn't expect index to reach capacity.");
 						}
 						do_erase(m_buckets, info, index);
 						++erased;
@@ -3733,11 +4070,11 @@ The type of Robinhood info being used by buckets.
 						++index;
 					}
 					return index;
-				});
-#ifdef SH_ROBINHOOD_DEBUG_ITERATOR
+				}) };
+#if SH_ROBINHOOD_DEBUG_ITERATOR != 0
 				// Invalidate iterators on erase.
 				m_buckets.invalidate_iterators();
-#endif // SH_ROBINHOOD_DEBUG_ITERATOR
+#endif // SH_ROBINHOOD_DEBUG_ITERATOR != 0
 				return index(result);
 			}
 		}
@@ -3755,13 +4092,13 @@ The type of Robinhood info being used by buckets.
 		template <typename InfoType, typename... Args>
 		find_result do_find(const InfoType* const info, const hash_result hash, Args&&... args) const noexcept
 		{
-			const size_type capacity = m_buckets.get_capacity();
-			const size_type bucket_index = hash_clamp_with_shift_bits(hash);
+			const size_type capacity{ m_buckets.get_capacity() };
+			const size_type bucket_index{ hash_clamp_with_shift_bits(hash) };
 			constexpr typename InfoType::distance_type initial_distance = 1;
 			wide_info_type info_temp(initial_distance, hash);
 			// Relies on an empty info element at m_buckets[capacity]
-			static_assert(buckets_type::info_tail > 0);
-			SH_ROBINHOOD_ASSERT(info[capacity].empty());
+			static_assert(buckets_type::info_tail > 0, "robinhood::hashtable::do_find expects the presence of an info tail.");
+			SH_ROBINHOOD_ASSERT(info[capacity].empty(), "robinhood::hashtable::do_find expects the info tail to be empty.");
 			for (size_type index = bucket_index; /*index != capacity*/; ++index, info_temp.push_forward())
 			{
 				static_assert(empty_distance_v<typename InfoType::distance_type> == std::numeric_limits<typename InfoType::distance_type>::min(),
@@ -3809,7 +4146,7 @@ The type of Robinhood info being used by buckets.
 				// loop, we can rely on that as a stopping condition in this loop.
 				for (size_type index = 0; ; ++index, info_temp.push_forward())
 				{
-					SH_ROBINHOOD_ASSERT(index <= bucket_index || info[index].empty());
+					SH_ROBINHOOD_ASSERT(index <= bucket_index || info[index].empty(), "robinhood::hashtable::do_find didn't expect to read a non-empty bucket_index.");
 					static_assert(empty_distance_v<typename InfoType::distance_type> == std::numeric_limits<typename InfoType::distance_type>::min(),
 						"The result of get_distance() when empty() is true must compare as less-than get_distance() when empty() is false.");
 					if (info[index].get_distance() < info_temp.get_distance())
@@ -3836,17 +4173,17 @@ The type of Robinhood info being used by buckets.
 		template <typename... Args>
 		find_result do_find(const hash_result hash, Args&&... args) const noexcept
 		{
-			return m_buckets.with_info([this, hash, &args...](const auto* const info) noexcept -> find_result
+			return m_buckets.with_info([this, hash, &args...](const auto* const SH_ROBINHOOD_RESTRICT info) noexcept -> find_result
 			{
-				return do_find(info, hash, std::forward<Args>(args)...);
+				return this->do_find(info, hash, std::forward<Args>(args)...);
 			});
 		}
 
 		template <typename KeyArg>
-		constexpr static std::conditional_t<(is_transparent || std::is_same_v<key_type, std::decay_t<std::remove_reference_t<KeyArg>>>), KeyArg&&, key_type>
-			do_key(KeyArg&& key_arg) noexcept
+		constexpr static decltype(auto) do_key(KeyArg&& key_arg) noexcept
 		{
-			if constexpr (false == is_transparent && false == std::is_same_v<key_type, std::decay_t<std::remove_reference_t<KeyArg>>>)
+			constexpr bool arg_is_key_type = std::is_same_v<key_type, std::decay_t<std::remove_reference_t<KeyArg>>>;
+			if constexpr (false == is_transparent && false == arg_is_key_type)
 			{
 				if constexpr (is_transparent_v<hasher>)
 				{
@@ -3857,18 +4194,24 @@ The type of Robinhood info being used by buckets.
 					SH_ROBINHOOD_WARN("robinhood::do_key casting to key_type despite key_equal::is_transparent.");
 				}
 			}
-			// Allow key_arg to cast to key_type implicitly, if able.
-			return std::forward<KeyArg>(key_arg);
+			if constexpr (is_transparent || arg_is_key_type)
+			{
+				return std::forward<KeyArg>(key_arg);
+			}
+			else
+			{
+				return key_type(std::forward<KeyArg>(key_arg));
+			}
 		}
 
 	protected:
 		constexpr size_type hash_clamp_with_shift_bits(const hash_result hash) const noexcept
 		{
-			return hash_clamp(hash, m_shift_bits);
+			return size_type(hash_clamp(hash, m_shift_bits));
 		}
 		constexpr float load_factor_with_given_size_current_capacity(const size_type size) const noexcept
 		{
-			return size / std::max<float>(std::numeric_limits<float>::min(), bucket_count());
+			return size / std::max<float>(std::numeric_limits<float>::min(), float(bucket_count()));
 		}
 
 		/**	The container of keys and any values.

@@ -7,3 +7,4 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin" CACHE PATH "Directo
 
 add_subdirectory(googletest)
 add_subdirectory(tests)
+add_subdirectory(benchmarks)

@@ -66,7 +66,7 @@ namespace robinhood
 		template <typename... Args>
 		constexpr explicit mutable_key(Args&&... args)
 			noexcept(std::is_nothrow_constructible_v<value_type, Args...>)
-			: m_value(std::forward<Args>(args)...)
+			: m_value{ std::forward<Args>(args)... }
 		{ }
 		mutable_key() = default;
 		mutable_key(const mutable_key&) = default;
@@ -258,70 +258,70 @@ public:
 
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset() noexcept(std::is_nothrow_constructible_v<allocator_type>)
-	: hashtable_type(allocator_type())
+	: hashtable_type{ allocator_type() }
 { }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(const allocator_type& alloc) noexcept
-	: hashtable_type(alloc)
+	: hashtable_type{ alloc }
 { }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(const size_type bucket_count, const hasher& hash, const key_equal& equal, const allocator_type& alloc)
-	: hashtable_type(bucket_count, hash, equal, alloc)
+	: hashtable_type{ bucket_count, hash, equal, alloc }
 { }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(const size_type bucket_count, const hasher& hash, const allocator_type& alloc)
-	: hashtable_type(bucket_count, hash, key_equal(), alloc)
+	: hashtable_type{ bucket_count, hash, key_equal(), alloc }
 { }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(const size_type bucket_count, const allocator_type& alloc)
-	: hashtable_type(bucket_count, hasher(), key_equal(), alloc)
+	: hashtable_type{ bucket_count, hasher(), key_equal(), alloc }
 { }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(const openset& other)
-	: hashtable_type(other)
+	: hashtable_type{ other }
 { }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(const openset& other, const allocator_type& alloc)
-	: hashtable_type(other, alloc)
+	: hashtable_type{ other, alloc }
 { }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(openset&& other) noexcept(std::is_nothrow_constructible_v<allocator_type>)
-	: hashtable_type(std::move(other))
+	: hashtable_type{ std::move(other) }
 { }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(openset&& other, const allocator_type& alloc) noexcept(typename hashtable_type::allocator_traits::is_always_equal())
-	: hashtable_type(std::move(other), alloc)
+	: hashtable_type{ std::move(other), alloc }
 { }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 template <typename InputIt>
-openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(InputIt first, InputIt last, const size_type bucket_count, const hasher& hash, const key_equal& equal, const allocator_type& alloc)
-	: hashtable_type(bucket_count, hash, equal, alloc)
+openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(const InputIt first, const InputIt last, const size_type bucket_count, const hasher& hash, const key_equal& equal, const allocator_type& alloc)
+	: hashtable_type{ bucket_count, hash, equal, alloc }
 {
 	insert(first, last);
 }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 template <typename InputIt>
-openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(InputIt first, InputIt last, const size_type bucket_count, const hasher& hash, const allocator_type& alloc)
-	: hashtable_type(first, last, bucket_count, hash, key_equal(), alloc)
+openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(const InputIt first, const InputIt last, const size_type bucket_count, const hasher& hash, const allocator_type& alloc)
+	: hashtable_type{ first, last, bucket_count, hash, key_equal(), alloc }
 { }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 template <typename InputIt>
-openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(InputIt first, InputIt last, const size_type bucket_count, const allocator_type& alloc)
-	: openset(first, last, bucket_count, hasher(), key_equal(), alloc)
+openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(const InputIt first, const InputIt last, const size_type bucket_count, const allocator_type& alloc)
+	: openset{ first, last, bucket_count, hasher(), key_equal(), alloc }
 { }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(std::initializer_list<value_type> init, const size_type bucket_count, const hasher& hash, const key_equal& equal, const allocator_type& alloc)
-	: hashtable_type(bucket_count, hash, equal, alloc)
+	: hashtable_type{ bucket_count, hash, equal, alloc }
 {
 	insert(std::move(init));
 }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(std::initializer_list<value_type> init, const size_type bucket_count, const hasher& hash, const allocator_type& alloc)
-	: openset(std::move(init), bucket_count, hash, key_equal(), alloc)
+	: openset{ std::move(init), bucket_count, hash, key_equal(), alloc }
 { }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openset<Key, Hash, KeyEqual, Allocator, SizeType>::openset(std::initializer_list<value_type> init, const size_type bucket_count, const allocator_type& alloc)
-	: openset(std::move(init), bucket_count, hasher(), key_equal(), alloc)
+	: openset{ std::move(init), bucket_count, hasher(), key_equal(), alloc }
 { }
 
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
@@ -340,12 +340,12 @@ auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::operator=(openset&& othe
 template <typename key, typename hash, typename keyequal, typename allocator, typename sizetype>
 constexpr auto openset<key, hash, keyequal, allocator, sizetype>::begin() -> iterator
 {
-	return iterator(this->hashtable_type::begin());
+	return iterator{ this->hashtable_type::begin() };
 }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::end() -> iterator
 {
-	return iterator(this->hashtable_type::end());
+	return iterator{ this->hashtable_type::end() };
 }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::begin() const -> const_iterator
@@ -371,12 +371,12 @@ constexpr auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::cend() const -
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::begin(const size_type n) -> local_iterator
 {
-	return local_iterator(this->hashtable_type::begin(n));
+	return local_iterator{ this->hashtable_type::begin(n) };
 }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::end(const size_type n) -> local_iterator
 {
-	return local_iterator(this->hashtable_type::end(n));
+	return local_iterator{ this->hashtable_type::end(n) };
 }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::begin(const size_type n) const -> const_local_iterator
@@ -427,7 +427,7 @@ auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::insert(const_iterator hi
 }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 template <typename InputIt>
-void openset<Key, Hash, KeyEqual, Allocator, SizeType>::insert(InputIt first, InputIt last)
+void openset<Key, Hash, KeyEqual, Allocator, SizeType>::insert(InputIt first, const InputIt last)
 {
 	while (first != last)
 	{
@@ -451,16 +451,16 @@ auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::emplace(KeyArg&& key_arg
 	const hash_result hash = static_cast<const hasher&>(*this)(key);
 	const find_result result = this->hashtable_type::do_find(hash, key);
 	return std::make_pair(
-		iterator(
+		iterator{
 			this->hashtable_type::index(
 				result.m_found
 					? result.m_index
 					: this->hashtable_type::do_emplace(
-						wide_info_type(result.m_distance, hash),
+						wide_info_type{ result.m_distance, hash },
 						result.m_index,
 						std::forward<decltype(key)>(key)).m_index
 			)
-		),
+		},
 		result.m_found == false);
 }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
@@ -485,7 +485,7 @@ auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::erase(KeyArg&& key_arg) 
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 void openset<Key, Hash, KeyEqual, Allocator, SizeType>::erase(const iterator pos)
 {
-	erase(const_iterator(pos));
+	erase(const_iterator{ pos });
 }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 void openset<Key, Hash, KeyEqual, Allocator, SizeType>::erase(const const_iterator pos)

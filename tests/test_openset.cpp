@@ -110,13 +110,10 @@ namespace
 	class counted_allocator : private std::allocator<T>
 	{
 	public:
-		using typename std::allocator<T>::value_type;
-		using typename std::allocator<T>::pointer;
-		using typename std::allocator<T>::const_pointer;
-		using typename std::allocator<T>::reference;
-		using typename std::allocator<T>::const_reference;
-		using typename std::allocator<T>::size_type;
-		using typename std::allocator<T>::difference_type;
+		using allocator_traits = std::allocator_traits<std::allocator<T>>;
+		using value_type = typename allocator_traits::value_type;
+		using size_type = typename allocator_traits::size_type;
+		using difference_type = typename allocator_traits::difference_type;
 
 		template <typename U>
 		struct rebind
@@ -161,13 +158,10 @@ namespace
 	template <typename T, bool Propagate = true>
 	struct stateful_allocator : private std::allocator<T>
 	{
-		using typename std::allocator<T>::value_type;
-		using typename std::allocator<T>::pointer;
-		using typename std::allocator<T>::const_pointer;
-		using typename std::allocator<T>::reference;
-		using typename std::allocator<T>::const_reference;
-		using typename std::allocator<T>::size_type;
-		using typename std::allocator<T>::difference_type;
+		using allocator_traits = std::allocator_traits<std::allocator<T>>;
+		using value_type = typename allocator_traits::value_type;
+		using size_type = typename allocator_traits::size_type;
+		using difference_type = typename allocator_traits::difference_type;
 		using std::allocator<T>::allocate;
 		using std::allocator<T>::deallocate;
 
@@ -214,13 +208,10 @@ namespace
 	template <typename T>
 	struct unreliable_allocator : private std::allocator<T>
 	{
-		using typename std::allocator<T>::value_type;
-		using typename std::allocator<T>::pointer;
-		using typename std::allocator<T>::const_pointer;
-		using typename std::allocator<T>::reference;
-		using typename std::allocator<T>::const_reference;
-		using typename std::allocator<T>::size_type;
-		using typename std::allocator<T>::difference_type;
+		using allocator_traits = std::allocator_traits<std::allocator<T>>;
+		using value_type = typename allocator_traits::value_type;
+		using size_type = typename allocator_traits::size_type;
+		using difference_type = typename allocator_traits::difference_type;
 
 		template <typename U>
 		struct rebind
@@ -269,6 +260,34 @@ namespace
 		using std::allocator<T>::deallocate;
 
 		const bool* m_can_allocate;
+	};
+
+	template <typename T>
+	class transparent_hash : private std::hash<T>
+	{
+	public:
+		using is_transparent = void;
+
+		transparent_hash(std::uint32_t& used_normally, std::uint32_t& used_transparently) noexcept
+			: m_used_normally{ &used_normally }
+			, m_used_transparently{ &used_transparently }
+		{ }
+
+		constexpr std::size_t operator()(const T& value) const noexcept
+		{
+			++(*m_used_normally);
+			return this->std::hash<T>::operator()(value);
+		}
+		template <typename U>
+		constexpr std::size_t operator()(const U& value) const noexcept
+		{
+			++(*m_used_transparently);
+			return this->std::hash<T>::operator()(value);
+		}
+
+	private:
+		std::uint32_t* m_used_normally;
+		std::uint32_t* m_used_transparently;
 	};
 
 	// Bad hash:
@@ -370,6 +389,26 @@ TEST(sh_openset, ctor_move)
 	EXPECT_EQ(y.bucket_count(), x_bucket_count);
 	EXPECT_TRUE(y.contains(1));
 }
+TEST(sh_openset, ctor_move_iterator)
+{
+	openset<int> x = { 1 };
+	ASSERT_FALSE(x.empty());
+	ASSERT_EQ(x.size(), 1u);
+
+	const auto it = x.begin();
+	ASSERT_NE(it, x.end());
+	ASSERT_EQ(*it, 1u);
+
+	openset<int> y{ std::move(x) };
+	EXPECT_TRUE(x.empty());
+	EXPECT_EQ(x.size(), 0u);
+	EXPECT_FALSE(y.empty());
+	EXPECT_EQ(y.size(), 1u);
+
+	EXPECT_EQ(it, y.begin());
+	ASSERT_NE(it, y.end());
+	EXPECT_EQ(*it, 1u);
+}
 TEST(sh_openset, ctor_move_alloc)
 {
 	using allocator_type = stateful_allocator<int>;
@@ -450,6 +489,34 @@ TEST(sh_openset, operator_assign)
 	EXPECT_EQ(y.size(), 1u);
 	EXPECT_EQ(y.bucket_count(), x.bucket_count());
 	EXPECT_TRUE(y.contains(1));
+
+	y = y;
+	EXPECT_FALSE(y.empty());
+	EXPECT_EQ(y.size(), 1u);
+	EXPECT_EQ(y.bucket_count(), x.bucket_count());
+	EXPECT_TRUE(y.contains(1));
+}
+TEST(sh_openset, operator_assign_iterator)
+{
+	openset<int> y, x = { 1 };
+	ASSERT_FALSE(x.empty());
+	ASSERT_EQ(x.size(), 1u);
+	EXPECT_TRUE(y.empty());
+	EXPECT_EQ(y.size(), 0u);
+
+	const auto it = x.begin();
+	ASSERT_NE(it, x.end());
+	ASSERT_EQ(*it, 1u);
+
+	y = std::move(x);
+	EXPECT_TRUE(x.empty());
+	EXPECT_EQ(x.size(), 0u);
+	EXPECT_FALSE(y.empty());
+	EXPECT_EQ(y.size(), 1u);
+
+	EXPECT_EQ(it, y.begin());
+	ASSERT_NE(it, y.end());
+	EXPECT_EQ(*it, 1u);
 }
 TEST(sh_openset, operator_assign_alloc)
 {
@@ -568,20 +635,22 @@ TEST(sh_openset, operator_assign_alloc)
 }
 TEST(sh_openset, operator_assign_move)
 {
-	openset<int> x(7);
-	x.emplace(1);
+	openset<std::string> x(7);
+	x.emplace("one");
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 1u);
 	const auto x_bucket_count = x.bucket_count();
 	ASSERT_GE(x_bucket_count, 1u);
-	ASSERT_TRUE(x.contains(1));
+	ASSERT_TRUE(x.contains("one"));
 
-	openset<int> y;
+	openset<std::string> y;
 	y = std::move(x);
 	EXPECT_FALSE(y.empty());
 	EXPECT_EQ(y.size(), 1u);
 	EXPECT_EQ(y.bucket_count(), x_bucket_count);
-	EXPECT_TRUE(y.contains(1));
+	EXPECT_TRUE(y.contains("one"));
+
+	y = std::move(y);
 }
 TEST(sh_openset, operator_assign_move_alloc)
 {
@@ -746,7 +815,7 @@ TEST(sh_openset, bucket_size)
 	for (int i = 1; i <= 4; ++i)
 	{
 		const auto index = hash_clamp(hasher, i, x.bucket_count());
-		EXPECT_EQ(x.bucket_size(index), 1u);
+		EXPECT_EQ(x.bucket_size(decltype(x.size())(index)), 1u);
 		filled[index] = true;
 	}
 
@@ -755,7 +824,7 @@ TEST(sh_openset, bucket_size)
 	{
 		if (!filled[i])
 		{
-			EXPECT_EQ(x.bucket_size(i), 0u);
+			EXPECT_EQ(x.bucket_size(decltype(x.size())(i)), 0u);
 		}
 	}
 }
@@ -846,6 +915,32 @@ TEST(sh_openset, swap)
 	EXPECT_EQ(x.size(), 0u);
 	EXPECT_FALSE(y.empty());
 	EXPECT_EQ(y.size(), 4u);
+
+	y.swap(y);
+	EXPECT_FALSE(y.empty());
+	EXPECT_EQ(y.size(), 4u);
+}
+TEST(sh_openset, swap_iterator)
+{
+	openset<int> y, x = { 1 };
+	ASSERT_FALSE(x.empty());
+	ASSERT_EQ(x.size(), 1u);
+	EXPECT_TRUE(y.empty());
+	EXPECT_EQ(y.size(), 0u);
+
+	const auto it = x.begin();
+	ASSERT_NE(it, x.end());
+	ASSERT_EQ(*it, 1u);
+
+	x.swap(y);
+	EXPECT_TRUE(x.empty());
+	EXPECT_EQ(x.size(), 0u);
+	EXPECT_FALSE(y.empty());
+	EXPECT_EQ(y.size(), 1u);
+
+	EXPECT_EQ(it, y.begin());
+	ASSERT_NE(it, y.end());
+	EXPECT_EQ(*it, 1u);
 }
 TEST(sh_openset, swap_alloc)
 {
@@ -1062,6 +1157,22 @@ TEST(sh_openset, emplace)
 	}
 	ASSERT_EQ(x.size(), 1u);
 }
+TEST(sh_openset, emplace_transparent)
+{
+	std::uint32_t hashed_normally = 0, hashed_transparently = 0;
+	openset<std::string, transparent_hash<std::string>, std::equal_to<>> x{
+		2,
+		transparent_hash<std::string>{ hashed_normally, hashed_transparently }
+	};
+
+	x.emplace(std::string{ "one" });
+	EXPECT_GE(hashed_normally, 1u);
+	EXPECT_EQ(hashed_transparently, 0u);
+
+	const char two[] = "two";
+	x.emplace(two);
+	EXPECT_GE(hashed_transparently, 1u);
+}
 TEST(sh_openset, emplace_hint)
 {
 	openset<std::string> x(4);
@@ -1099,6 +1210,22 @@ TEST(sh_openset, erase)
 	x.erase(x.find(4));
 	EXPECT_EQ(x.size(), 0u);
 	EXPECT_TRUE(x.empty());
+}
+TEST(sh_openset, erase_transparent)
+{
+	std::uint32_t used_normally = 0, used_transparently = 0;
+	openset<int, transparent_hash<int>, std::equal_to<>> x{
+		{ 1, 2 },
+		2,
+		transparent_hash<int>{ used_normally, used_transparently }
+	};
+
+	x.erase(1);
+	EXPECT_GE(used_normally, 1u);
+	EXPECT_EQ(used_transparently, 0u);
+
+	x.erase(static_cast<unsigned short>(2));
+	EXPECT_GE(used_transparently, 1u);
 }
 TEST(sh_openset, erase_range)
 {
@@ -1207,6 +1334,22 @@ TEST(sh_openset, count)
 		EXPECT_EQ(x.count(i), 1u);
 	}
 }
+TEST(sh_openset, count_transparent)
+{
+	std::uint32_t used_normally = 0, used_transparently = 0;
+	openset<int, transparent_hash<int>, std::equal_to<>> x{
+		{ 1, 2, },
+		2,
+		transparent_hash<int>{ used_normally, used_transparently }
+	};
+
+	x.count(1);
+	EXPECT_GE(used_normally, 1u);
+	EXPECT_EQ(used_transparently, 0u);
+
+	x.count(static_cast<unsigned short>(2));
+	EXPECT_GE(used_transparently, 1u);
+}
 TEST(sh_openset, contains)
 {
 	openset<int> x = { 1, 2, 3, 4 };
@@ -1217,6 +1360,22 @@ TEST(sh_openset, contains)
 	{
 		EXPECT_TRUE(x.contains(i));
 	}
+}
+TEST(sh_openset, contains_transparent)
+{
+	std::uint32_t used_normally = 0, used_transparently = 0;
+	openset<int, transparent_hash<int>, std::equal_to<>> x{
+		{ 1, 2, },
+		2,
+		transparent_hash<int>{ used_normally, used_transparently }
+	};
+
+	x.contains(1);
+	EXPECT_GE(used_normally, 1u);
+	EXPECT_EQ(used_transparently, 0u);
+
+	x.contains(static_cast<unsigned short>(2));
+	EXPECT_GE(used_transparently, 1u);
 }
 TEST(sh_openset, find)
 {
@@ -1229,6 +1388,22 @@ TEST(sh_openset, find)
 	{
 		EXPECT_NE(x.find(i), x.end());
 	}
+}
+TEST(sh_openset, find_transparent)
+{
+	std::uint32_t used_normally = 0, used_transparently = 0;
+	openset<int, transparent_hash<int>, std::equal_to<>> x{
+		{ 1, 2, },
+		2,
+		transparent_hash<int>{ used_normally, used_transparently }
+	};
+
+	x.find(1);
+	EXPECT_GE(used_normally, 1u);
+	EXPECT_EQ(used_transparently, 0u);
+
+	x.find(static_cast<unsigned short>(2));
+	EXPECT_GE(used_transparently, 1u);
 }
 TEST(sh_openset, equal_range)
 {

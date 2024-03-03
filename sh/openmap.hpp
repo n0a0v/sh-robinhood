@@ -76,8 +76,8 @@ namespace robinhood
 		constexpr const_key_value_pair(KeyArg&& key, ValueArg&& value)
 			noexcept(std::is_nothrow_constructible_v<key_type, KeyArg&&>
 				&& std::is_nothrow_constructible_v<value_type, ValueArg&&>)
-			: first(std::forward<KeyArg>(key))
-			, second(std::forward<ValueArg>(value))
+			: first{ std::forward<KeyArg>(key) }
+			, second{ std::forward<ValueArg>(value) }
 		{ }
 		/**	Construct from a pair's members.
 		 *	@param keyvalue The pair from which to accept first as first (or key) and second as second (or value).
@@ -86,8 +86,8 @@ namespace robinhood
 		constexpr const_key_value_pair(const std::pair<KeyArg, ValueArg>& keyvalue)
 			noexcept(std::is_nothrow_constructible_v<key_type, KeyArg>
 				&& std::is_nothrow_constructible_v<value_type, ValueArg>)
-			: first(keyvalue.first)
-			, second(keyvalue.second)
+			: first{ keyvalue.first }
+			, second{ keyvalue.second }
 		{ }
 		/**	Move construct from a pair's members.
 		 *	@param keyvalue The pair from which to accept std::move(first) as first (or key) and std::move(second) as second (or value).
@@ -96,16 +96,16 @@ namespace robinhood
 		constexpr const_key_value_pair(std::pair<KeyArg, ValueArg>&& keyvalue)
 			noexcept(std::is_nothrow_constructible_v<key_type, KeyArg&&>
 				&& std::is_nothrow_constructible_v<value_type, ValueArg&&>)
-			: first(std::move(keyvalue.first))
-			, second(std::move(keyvalue.second))
+			: first{ std::move(keyvalue.first) }
+			, second{ std::move(keyvalue.second) }
 		{ }
 		const_key_value_pair() = default;
 		const_key_value_pair(const const_key_value_pair&) = default;
 		const_key_value_pair(const_key_value_pair&& other)
 			noexcept(std::is_nothrow_move_constructible_v<key_type>
 				&& std::is_nothrow_move_constructible_v<value_type>)
-			: first(std::move(other.key()))
-			, second(std::move(other.second))
+			: first{ std::move(other.key()) }
+			, second{ std::move(other.second) }
 		{ }
 		~const_key_value_pair() = default;
 
@@ -204,7 +204,7 @@ namespace robinhood
 		template <typename... Args>
 		constexpr explicit mutable_key_value_pair(Args&&... args)
 			noexcept(std::is_nothrow_constructible_v<const_key_value_pair<key_type, value_type>, Args...>)
-			: m_keyvalue(std::forward<Args>(args)...)
+			: m_keyvalue{ std::forward<Args>(args)... }
 		{ }
 		mutable_key_value_pair() = default;
 		mutable_key_value_pair(const mutable_key_value_pair&) = default;
@@ -435,70 +435,70 @@ public:
 
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap() noexcept(std::is_nothrow_constructible_v<allocator_type>)
-	: hashtable_type(allocator_type())
+	: hashtable_type{ allocator_type() }
 { }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(const allocator_type& alloc) noexcept
-	: hashtable_type(alloc)
+	: hashtable_type{ alloc }
 { }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(const size_type bucket_count, const hasher& hash, const key_equal& equal, const allocator_type& alloc)
-	: hashtable_type(bucket_count, hash, equal, alloc)
+	: hashtable_type{ bucket_count, hash, equal, alloc }
 { }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(const size_type bucket_count, const hasher& hash, const allocator_type& alloc)
-	: hashtable_type(bucket_count, hash, key_equal(), alloc)
+	: hashtable_type{ bucket_count, hash, key_equal(), alloc }
 { }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(const size_type bucket_count, const allocator_type& alloc)
-	: hashtable_type(bucket_count, hasher(), key_equal(), alloc)
+	: hashtable_type{ bucket_count, hasher(), key_equal(), alloc }
 { }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(const openmap& other)
-	: hashtable_type(other)
+	: hashtable_type{ other }
 { }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(const openmap& other, const allocator_type& alloc)
-	: hashtable_type(other, alloc)
+	: hashtable_type{ other, alloc }
 { }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(openmap&& other) noexcept(std::is_nothrow_constructible_v<allocator_type>)
-	: hashtable_type(std::move(other))
+	: hashtable_type{ std::move(other) }
 { }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(openmap&& other, const allocator_type& alloc) noexcept(typename hashtable_type::allocator_traits::is_always_equal())
-	: hashtable_type(std::move(other), alloc)
+	: hashtable_type{ std::move(other), alloc }
 { }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 template <typename InputIt>
-openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(InputIt first, InputIt last, const size_type bucket_count, const hasher& hash, const key_equal& equal, const allocator_type& alloc)
-	: hashtable_type(bucket_count, hash, equal, alloc)
+openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(const InputIt first, const InputIt last, const size_type bucket_count, const hasher& hash, const key_equal& equal, const allocator_type& alloc)
+	: hashtable_type{ bucket_count, hash, equal, alloc }
 {
 	insert(first, last);
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 template <typename InputIt>
-openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(InputIt first, InputIt last, const size_type bucket_count, const hasher& hash, const allocator_type& alloc)
-	: openmap(first, last, bucket_count, hash, key_equal(), alloc)
+openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(const InputIt first, const InputIt last, const size_type bucket_count, const hasher& hash, const allocator_type& alloc)
+	: openmap{ first, last, bucket_count, hash, key_equal(), alloc }
 { }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 template <typename InputIt>
-openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(InputIt first, InputIt last, const size_type bucket_count, const allocator_type& alloc)
-	: hashtable_type(first, last, bucket_count, hasher(), key_equal(), alloc)
+openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(const InputIt first, const InputIt last, const size_type bucket_count, const allocator_type& alloc)
+	: hashtable_type{ first, last, bucket_count, hasher(), key_equal(), alloc }
 { }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(std::initializer_list<std::pair<key_type, mapped_type>> init, const size_type bucket_count, const hasher& hash, const key_equal& equal, const allocator_type& alloc)
-	: hashtable_type(bucket_count, hash, equal, alloc)
+	: hashtable_type{ bucket_count, hash, equal, alloc }
 {
 	insert(std::move(init));
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(std::initializer_list<std::pair<key_type, mapped_type>> init, const size_type bucket_count, const hasher& hash, const allocator_type& alloc)
-	: openmap(std::move(init), bucket_count, hash, key_equal(), alloc)
+	: openmap{ std::move(init), bucket_count, hash, key_equal(), alloc }
 { }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::openmap(std::initializer_list<std::pair<key_type, mapped_type>> init, const size_type bucket_count, const allocator_type& alloc)
-	: openmap(std::move(init), bucket_count, hasher(), key_equal(), alloc)
+	: openmap{ std::move(init), bucket_count, hasher(), key_equal(), alloc }
 { }
 
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
@@ -517,12 +517,12 @@ auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::operator=(openmap&& o
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::begin() -> iterator
 {
-	return iterator(this->hashtable_type::begin());
+	return iterator{ this->hashtable_type::begin() };
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::end() -> iterator
 {
-	return iterator(this->hashtable_type::end());
+	return iterator{ this->hashtable_type::end() };
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::begin() const -> const_iterator
@@ -548,12 +548,12 @@ constexpr auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::cend() cons
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::begin(const size_type n) -> local_iterator
 {
-	return local_iterator(this->hashtable_type::begin(n));
+	return local_iterator{ this->hashtable_type::begin(n) };
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::end(const size_type n) -> local_iterator
 {
-	return local_iterator(this->hashtable_type::end(n));
+	return local_iterator{ this->hashtable_type::end(n) };
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::begin(const size_type n) const -> const_local_iterator
@@ -604,7 +604,7 @@ auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::insert(const_iterator
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 template <typename InputIt>
-void openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::insert(InputIt first, InputIt last)
+void openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::insert(InputIt first, const InputIt last)
 {
 	while (first != last)
 	{
@@ -630,18 +630,18 @@ auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::insert_or_assign(KeyA
 	{
 		const auto result_it = this->hashtable_type::index(result.m_index);
 		result_it->value() = std::forward<ValueArg>(value);
-		return std::make_pair(iterator(result_it), false);
+		return std::make_pair(iterator{ result_it }, false);
 	}
 	return std::make_pair(
-		iterator(
+		iterator{
 			this->hashtable_type::index(
 				this->hashtable_type::do_emplace(
-					wide_info_type(result.m_distance, hash),
+					wide_info_type{ result.m_distance, hash },
 					result.m_index,
 					std::forward<decltype(key)>(key),
 					std::forward<ValueArg>(value)).m_index
 			)
-		),
+		},
 		true);
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
@@ -655,15 +655,21 @@ template <typename Key, typename T, typename Hash, typename KeyEqual, typename A
 template <typename... Args>
 auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::emplace(Args&&... args) -> std::pair<iterator, bool>
 {
-	value_type value(std::forward<Args>(args)...);
-	return try_emplace(std::move(value.first), std::move(value.second));
+	if constexpr (sizeof...(Args) == 2)
+	{
+		return try_emplace(std::forward<Args>(args)...);
+	}
+	else
+	{
+		value_type value{ std::forward<Args>(args)... };
+		return try_emplace(std::move(value.first), std::move(value.second));
+	}
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 template <typename... Args>
 auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::emplace_hint(const const_iterator hint, Args&&... args) -> iterator
 {
-	value_type value(std::forward<Args>(args)...);
-	return try_emplace_hint(hint, std::move(value.first), std::move(value.second));
+	return emplace(std::forward<Args>(args)...).first;
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 template <typename KeyArg, typename... Args>
@@ -673,17 +679,17 @@ auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::try_emplace(KeyArg&& 
 	const hash_result hash = static_cast<const hasher&>(*this)(key);
 	const find_result result = this->hashtable_type::do_find(hash, key);
 	return std::make_pair(
-		iterator(
+		iterator{
 			this->hashtable_type::index(
 				result.m_found
 					? result.m_index
 					: this->hashtable_type::do_emplace(
-						wide_info_type(result.m_distance, hash),
+						wide_info_type{ result.m_distance, hash },
 						result.m_index,
 						std::forward<decltype(key)>(key),
 						std::forward<Args>(args)...).m_index
 			)
-		),
+		},
 		result.m_found == false);
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
@@ -708,7 +714,7 @@ auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::erase(KeyArg&& key_ar
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 void openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::erase(const iterator pos)
 {
-	erase(const_iterator(pos));
+	erase(const_iterator{ pos });
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 void openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::erase(const const_iterator pos)
@@ -741,7 +747,7 @@ auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::operator[](KeyArg&& k
 	if (result.m_found == false)
 	{
 		result.m_index = this->hashtable_type::do_emplace(
-			wide_info_type(result.m_distance, hash),
+			wide_info_type{ result.m_distance, hash },
 			result.m_index,
 			std::forward<decltype(key)>(key),
 			mapped_type()).m_index;
@@ -792,7 +798,7 @@ auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::find(KeyArg&& key_arg
 	const hash_result hash = static_cast<const hasher&>(*this)(key);
 	const find_result result = this->hashtable_type::do_find(hash, std::forward<decltype(key)>(key));
 	return result.m_found
-		? iterator(this->hashtable_type::index(result.m_index))
+		? iterator{ this->hashtable_type::index(result.m_index) }
 		: end();
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
@@ -803,7 +809,7 @@ auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::find(KeyArg&& key_arg
 	const hash_result hash = static_cast<const hasher&>(*this)(key);
 	const find_result result = this->hashtable_type::do_find(hash, std::forward<decltype(key)>(key));
 	return result.m_found
-		? const_iterator(this->hashtable_type::index(result.m_index))
+		? const_iterator{ this->hashtable_type::index(result.m_index) }
 		: cend();
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>

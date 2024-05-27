@@ -72,39 +72,41 @@ namespace
 		}
 	}
 
-	struct general_allocations
+	struct allocations
 	{
-		static std::size_t m_current;
-		static std::size_t m_peak;
-		static std::size_t m_allocate_calls;
-		static std::size_t m_deallocate_calls;
+		std::size_t m_current{ 0 };
+		std::size_t m_peak{ 0 };
+		std::size_t m_allocate_calls{ 0 };
+		std::size_t m_deallocate_calls{ 0 };
+		std::size_t m_construct_calls{ 0 };
+		std::size_t m_destroy_calls{ 0 };
 
-		static void reset()
+		void reset()
 		{
-			m_current = m_peak = m_allocate_calls = m_deallocate_calls = 0;
+			*this = allocations{};
+		}
+		friend std::ostream& operator<<(std::ostream& ostr, const allocations& all)
+		{
+			return ostr << "current " << all.m_current << " bytes"
+				", peak " << all.m_peak << " bytes"
+				", allocate calls " << all.m_allocate_calls <<
+				", deallocate calls " << all.m_deallocate_calls <<
+				", construct calls " << all.m_construct_calls <<
+				", destroy calls " << all.m_destroy_calls;
 		}
 	};
-	std::size_t general_allocations::m_current = 0;
-	std::size_t general_allocations::m_peak = 0;
-	std::size_t general_allocations::m_allocate_calls = 0;
-	std::size_t general_allocations::m_deallocate_calls = 0;
 
 	template <typename T>
-	struct typed_allocations
+	struct typed_allocations : allocations
 	{
-		static std::size_t m_current;
-		static std::size_t m_peak;
-		static std::size_t m_allocate_calls;
-		static std::size_t m_deallocate_calls;
+		static allocations& get()
+		{
+			static allocations instance;
+			return instance;
+		}
 	};
-	template <typename T>
-	std::size_t typed_allocations<T>::m_current = 0;
-	template <typename T>
-	std::size_t typed_allocations<T>::m_peak = 0;
-	template <typename T>
-	std::size_t typed_allocations<T>::m_allocate_calls = 0;
-	template <typename T>
-	std::size_t typed_allocations<T>::m_deallocate_calls = 0;
+
+	using general_allocations = typed_allocations<void>;
 
 	template <typename T>
 	class counted_allocator : private std::allocator<T>
@@ -136,34 +138,56 @@ namespace
 
 		[[nodiscard]] constexpr T* allocate(const std::size_t n)
 		{
-			general_allocations::m_current += sizeof(T) * n;
-			general_allocations::m_allocate_calls += 1;
-			general_allocations::m_peak = std::max(general_allocations::m_peak, general_allocations::m_current);
+			general_allocations::get().m_current += sizeof(T) * n;
+			general_allocations::get().m_allocate_calls += 1;
+			general_allocations::get().m_peak = std::max(general_allocations::get().m_peak, general_allocations::get().m_current);
 
-			typed_allocations<T>::m_current += n;
-			typed_allocations<T>::m_allocate_calls += 1;
-			typed_allocations<T>::m_peak = std::max(typed_allocations<T>::m_peak, typed_allocations<T>::m_current);
+			typed_allocations<T>::get().m_current += n;
+			typed_allocations<T>::get().m_allocate_calls += 1;
+			typed_allocations<T>::get().m_peak = std::max(typed_allocations<T>::get().m_peak, typed_allocations<T>::get().m_current);
 			return this->std::allocator<T>::allocate(n);
 		}
 		constexpr void deallocate(T* const p, const std::size_t n)
 		{
-			general_allocations::m_current -= sizeof(T) * n;
-			general_allocations::m_deallocate_calls += 1;
-			typed_allocations<T>::m_current -= n;
-			typed_allocations<T>::m_deallocate_calls += 1;
+			general_allocations::get().m_current -= sizeof(T) * n;
+			general_allocations::get().m_deallocate_calls += 1;
+			typed_allocations<T>::get().m_current -= n;
+			typed_allocations<T>::get().m_deallocate_calls += 1;
 			this->std::allocator<T>::deallocate(p, n);
+		}
+		template <typename U, typename... Args>
+		void construct(U* const p, Args&&... args)
+		{
+			this->std::allocator<T>::template construct<U>(p, std::forward<Args>(args)...);
+			if constexpr (std::is_trivially_destructible_v<U> == false)
+			{
+				general_allocations::get().m_construct_calls += 1;
+				typed_allocations<T>::get().m_construct_calls += 1;
+			}
+		}
+		template <typename U>
+		void destroy(U* const p)
+		{
+			if constexpr (std::is_trivially_destructible_v<U> == false)
+			{
+				general_allocations::get().m_destroy_calls += 1;
+				typed_allocations<T>::get().m_destroy_calls += 1;
+			}
+			this->std::allocator<T>::template destroy<U>(p);
 		}
 	};
 
 	template <typename T, bool Propagate = true>
-	struct stateful_allocator : private std::allocator<T>
+	struct stateful_allocator : private counted_allocator<T>
 	{
-		using allocator_traits = std::allocator_traits<std::allocator<T>>;
+		using allocator_traits = std::allocator_traits<counted_allocator<T>>;
 		using value_type = typename allocator_traits::value_type;
 		using size_type = typename allocator_traits::size_type;
 		using difference_type = typename allocator_traits::difference_type;
-		using std::allocator<T>::allocate;
-		using std::allocator<T>::deallocate;
+		using counted_allocator<T>::allocate;
+		using counted_allocator<T>::deallocate;
+		using counted_allocator<T>::construct;
+		using counted_allocator<T>::destroy;
 
 		template <typename U>
 		struct rebind
@@ -206,9 +230,9 @@ namespace
 	};
 
 	template <typename T>
-	struct unreliable_allocator : private std::allocator<T>
+	struct unreliable_allocator : private counted_allocator<T>
 	{
-		using allocator_traits = std::allocator_traits<std::allocator<T>>;
+		using allocator_traits = std::allocator_traits<counted_allocator<T>>;
 		using value_type = typename allocator_traits::value_type;
 		using size_type = typename allocator_traits::size_type;
 		using difference_type = typename allocator_traits::difference_type;
@@ -255,9 +279,11 @@ namespace
 			{
 				throw std::bad_alloc();
 			}
-			return this->std::allocator<T>::allocate(n);
+			return this->counted_allocator<T>::allocate(n);
 		}
-		using std::allocator<T>::deallocate;
+		using counted_allocator<T>::deallocate;
+		using counted_allocator<T>::construct;
+		using counted_allocator<T>::destroy;
 
 		const bool* m_can_allocate;
 	};
@@ -299,44 +325,77 @@ namespace
 			return value / 1000;
 		}
 	};
+
+	// Fixture
+	class sh_openmap : public ::testing::Test
+	{
+	protected:
+		void SetUp() override
+		{
+			general_allocations::get() = allocations{};
+			ASSERT_EQ(0u, general_allocations::get().m_current);
+			ASSERT_EQ(0u, general_allocations::get().m_allocate_calls);
+			ASSERT_EQ(0u, general_allocations::get().m_deallocate_calls);
+			ASSERT_EQ(0u, general_allocations::get().m_construct_calls);
+			ASSERT_EQ(0u, general_allocations::get().m_destroy_calls);
+		}
+		void TearDown() override
+		{
+			EXPECT_EQ(0u, general_allocations::get().m_current);
+			EXPECT_EQ(general_allocations::get().m_allocate_calls, general_allocations::get().m_deallocate_calls);
+			EXPECT_EQ(general_allocations::get().m_construct_calls, general_allocations::get().m_destroy_calls);
+			if constexpr (DEBUG_VERBOSE)
+			{
+				std::cout << '\t' << general_allocations::get() << std::endl;
+			}
+		}
+	};
+
+	template <typename Key,
+		typename T,
+		typename Hash = std::hash<Key>,
+		typename KeyEqual = std::equal_to<Key>,
+		typename Allocator = counted_allocator<std::pair<const Key, T>>,
+		typename SizeType = sh::robinhood::default_size_type>
+	using counted_openmap = openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>;
 } // anonymous namespace
 
-TEST(sh_openmap, ctor_default)
+TEST_F(sh_openmap, ctor_default)
 {
-	openmap<int, std::string> x;
+	counted_openmap<int, std::string> x;
 	EXPECT_TRUE(x.empty());
 	EXPECT_EQ(x.size(), 0u);
 }
-TEST(sh_openmap, ctor_alloc)
+TEST_F(sh_openmap, ctor_alloc)
 {
 	using allocator_type = stateful_allocator<std::pair<int, std::string>>;
 	openmap<int, std::string, std::hash<int>, std::equal_to<int>, allocator_type> x(allocator_type(123));
 	EXPECT_TRUE(x.empty());
 	EXPECT_EQ(x.size(), 0u);
 }
-TEST(sh_openmap, ctor_buckets)
+TEST_F(sh_openmap, ctor_buckets)
 {
-	openmap<int, std::string> x(7);
+	counted_openmap<int, std::string> x(7);
 	EXPECT_TRUE(x.empty());
 	EXPECT_EQ(x.size(), 0u);
 	EXPECT_GE(x.bucket_count(), 7u);
 }
-TEST(sh_openmap, ctor_copy)
+TEST_F(sh_openmap, ctor_copy)
 {
-	openmap<int, std::string> x(7);
+	counted_openmap<int, std::string> x(7);
 	x.try_emplace(1, "one");
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 1u);
 	ASSERT_GE(x.bucket_count(), 1u);
 	ASSERT_TRUE(x.contains(1));
 
-	openmap<int, std::string> y(x);
+	counted_openmap<int, std::string> y(x);
 	EXPECT_FALSE(y.empty());
 	EXPECT_EQ(y.size(), 1u);
 	EXPECT_EQ(y.bucket_count(), x.bucket_count());
 	EXPECT_EQ(y.at(1), "one");
 }
-TEST(sh_openmap, ctor_copy_alloc)
+TEST_F(sh_openmap, ctor_copy_alloc)
 {
 	using allocator_type = stateful_allocator<std::pair<int, std::string>>;
 	using map_type = openmap<int, std::string, std::hash<int>, std::equal_to<int>, allocator_type>;
@@ -373,9 +432,9 @@ TEST(sh_openmap, ctor_copy_alloc)
 		EXPECT_EQ(y.at(1), "one");
 	}
 }
-TEST(sh_openmap, ctor_move)
+TEST_F(sh_openmap, ctor_move)
 {
-	openmap<int, std::string> x(7);
+	counted_openmap<int, std::string> x(7);
 	x.try_emplace(1, "one");
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 1u);
@@ -383,15 +442,15 @@ TEST(sh_openmap, ctor_move)
 	ASSERT_GE(x_bucket_count, 1u);
 	ASSERT_TRUE(x.contains(1));
 
-	openmap<int, std::string> y(std::move(x));
+	counted_openmap<int, std::string> y(std::move(x));
 	EXPECT_FALSE(y.empty());
 	EXPECT_EQ(y.size(), 1u);
 	EXPECT_EQ(y.bucket_count(), x_bucket_count);
 	EXPECT_EQ(y.at(1), "one");
 }
-TEST(sh_openmap, ctor_move_iterator)
+TEST_F(sh_openmap, ctor_move_iterator)
 {
-	openmap<int, std::string> x = { { 1, "one" } };
+	counted_openmap<int, std::string> x = { { 1, "one" } };
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 1u);
 
@@ -400,7 +459,7 @@ TEST(sh_openmap, ctor_move_iterator)
 	ASSERT_EQ(it->first, 1u);
 	ASSERT_EQ(it->second, "one");
 
-	openmap<int, std::string> y{ std::move(x) };
+	counted_openmap<int, std::string> y{ std::move(x) };
 	EXPECT_TRUE(x.empty());
 	EXPECT_EQ(x.size(), 0u);
 	EXPECT_FALSE(y.empty());
@@ -411,7 +470,7 @@ TEST(sh_openmap, ctor_move_iterator)
 	EXPECT_EQ(it->first, 1u);
 	EXPECT_EQ(it->second, "one");
 }
-TEST(sh_openmap, ctor_move_alloc)
+TEST_F(sh_openmap, ctor_move_alloc)
 {
 	using allocator_type = stateful_allocator<std::pair<int, std::string>>;
 	using map_type = openmap<int, std::string, std::hash<int>, std::equal_to<int>, allocator_type>;
@@ -450,7 +509,7 @@ TEST(sh_openmap, ctor_move_alloc)
 		EXPECT_EQ(y.at(1), "one");
 	}
 }
-TEST(sh_openmap, ctor_range)
+TEST_F(sh_openmap, ctor_range)
 {
 	const std::vector<std::pair<int, std::string>> values = {
 		{ 1, "one" },
@@ -458,7 +517,7 @@ TEST(sh_openmap, ctor_range)
 		{ 3, "three" },
 	};
 
-	openmap<int, std::string> x(values.begin(), values.end());
+	counted_openmap<int, std::string> x(values.begin(), values.end());
 	EXPECT_FALSE(x.empty());
 	EXPECT_EQ(x.size(), values.size());
 	EXPECT_GE(x.bucket_count(), 1u);
@@ -468,7 +527,7 @@ TEST(sh_openmap, ctor_range)
 		EXPECT_EQ(x.at(key), value);
 	}
 }
-TEST(sh_openmap, ctor_initializer_list)
+TEST_F(sh_openmap, ctor_initializer_list)
 {
 	const std::initializer_list<std::pair<int, std::string>> ilist = {
 		{ 1, "one" },
@@ -476,7 +535,7 @@ TEST(sh_openmap, ctor_initializer_list)
 		{ 3, "three" },
 	};
 
-	openmap<int, std::string> x(ilist.begin(), ilist.end());
+	counted_openmap<int, std::string> x(ilist.begin(), ilist.end());
 	EXPECT_FALSE(x.empty());
 	EXPECT_EQ(x.size(), ilist.size());
 	EXPECT_GE(x.bucket_count(), 1u);
@@ -486,10 +545,10 @@ TEST(sh_openmap, ctor_initializer_list)
 		EXPECT_EQ(x.at(item.first), item.second);
 	}
 }
-TEST(sh_openmap, operator_assign)
+TEST_F(sh_openmap, operator_assign)
 {
 	{
-		using map_type = openmap<int, std::string>;
+		using map_type = counted_openmap<int, std::string>;
 		map_type x(7);
 		x.try_emplace(1, "one");
 		ASSERT_FALSE(x.empty());
@@ -521,7 +580,7 @@ TEST(sh_openmap, operator_assign)
 		EXPECT_EQ(y.at(1), 1111);
 	}
 	{
-		using map_type = openmap<int, std::string>;
+		using map_type = counted_openmap<int, std::string>;
 		map_type x(7);
 		x.try_emplace(1, "one");
 		ASSERT_FALSE(x.empty());
@@ -536,9 +595,9 @@ TEST(sh_openmap, operator_assign)
 		EXPECT_TRUE(x.contains(1));
 	}
 }
-TEST(sh_openmap, operator_assign_iterator)
+TEST_F(sh_openmap, operator_assign_iterator)
 {
-	openmap<int, std::string> y, x = { { 1, "one" } };
+	counted_openmap<int, std::string> y, x = { { 1, "one" } };
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 1u);
 	ASSERT_TRUE(y.empty());
@@ -560,7 +619,7 @@ TEST(sh_openmap, operator_assign_iterator)
 	EXPECT_EQ(it->first, 1u);
 	EXPECT_EQ(it->second, "one");
 }
-TEST(sh_openmap, operator_assign_alloc)
+TEST_F(sh_openmap, operator_assign_alloc)
 {
 	{
 		constexpr bool propagate = true;
@@ -675,9 +734,9 @@ TEST(sh_openmap, operator_assign_alloc)
 		}
 	}
 }
-TEST(sh_openmap, operator_assign_move)
+TEST_F(sh_openmap, operator_assign_move)
 {
-	openmap<int, std::string> x(7);
+	counted_openmap<int, std::string> x(7);
 	x.try_emplace(1, "one");
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 1u);
@@ -685,7 +744,7 @@ TEST(sh_openmap, operator_assign_move)
 	ASSERT_GE(x_bucket_count, 1u);
 	ASSERT_TRUE(x.contains(1));
 
-	openmap<int, std::string> y;
+	counted_openmap<int, std::string> y;
 	y = std::move(x);
 	EXPECT_FALSE(y.empty());
 	EXPECT_EQ(y.size(), 1u);
@@ -694,7 +753,7 @@ TEST(sh_openmap, operator_assign_move)
 
 	y = std::move(y);
 }
-TEST(sh_openmap, operator_assign_move_alloc)
+TEST_F(sh_openmap, operator_assign_move_alloc)
 {
 	{
 		constexpr bool propagate = true;
@@ -815,9 +874,9 @@ TEST(sh_openmap, operator_assign_move_alloc)
 		}
 	}
 }
-TEST(sh_openmap, bucket)
+TEST_F(sh_openmap, bucket)
 {
-	openmap<int, std::string> x(2);
+	counted_openmap<int, std::string> x(2);
 	x.try_emplace(1, "one");
 	x.try_emplace(2, "two");
 	x.try_emplace(3, "three");
@@ -832,7 +891,7 @@ TEST(sh_openmap, bucket)
 		EXPECT_EQ(x.bucket(i), index);
 	}
 }
-TEST(sh_openmap, bucket_size)
+TEST_F(sh_openmap, bucket_size)
 {
 	struct direct_int_hash
 	{
@@ -870,9 +929,9 @@ TEST(sh_openmap, bucket_size)
 		}
 	}
 }
-TEST(sh_openmap, load_factor)
+TEST_F(sh_openmap, load_factor)
 {
-	openmap<int, std::string> x(8);
+	counted_openmap<int, std::string> x(8);
 	ASSERT_FLOAT_EQ(x.load_factor(), 0.0f);
 
 	x.try_emplace(1, "one");
@@ -882,9 +941,9 @@ TEST(sh_openmap, load_factor)
 	x.try_emplace(3, "three");
 	ASSERT_FLOAT_EQ(x.load_factor(), float(x.size()) / x.bucket_count());
 }
-TEST(sh_openmap, max_load_factor)
+TEST_F(sh_openmap, max_load_factor)
 {
-	openmap<int, std::string> x(8);
+	counted_openmap<int, std::string> x(8);
 	constexpr float max_load_factor = 0.25f;
 	x.max_load_factor(max_load_factor);
 	ASSERT_FLOAT_EQ(x.max_load_factor(), max_load_factor);
@@ -897,15 +956,15 @@ TEST(sh_openmap, max_load_factor)
 		ASSERT_LE(x.load_factor(), max_load_factor);
 	}
 }
-TEST(sh_openmap, key_eq)
+TEST_F(sh_openmap, key_eq)
 {
-	openmap<int, std::string> x(8);
+	counted_openmap<int, std::string> x(8);
 	EXPECT_TRUE(x.key_eq()(1, 1));
 	EXPECT_FALSE(x.key_eq()(1, 2));
 }
-TEST(sh_openmap, begin_end)
+TEST_F(sh_openmap, begin_end)
 {
-	openmap<int, std::string> x = {
+	counted_openmap<int, std::string> x = {
 		{ 1, "one" },
 		{ 2, "two" },
 		{ 3, "three" },
@@ -928,9 +987,9 @@ TEST(sh_openmap, begin_end)
 	EXPECT_EQ(key_sum, 10);
 	EXPECT_EQ(value_sum, 193);
 }
-TEST(sh_openmap, cbegin_cend)
+TEST_F(sh_openmap, cbegin_cend)
 {
-	const openmap<int, std::string> x = {
+	const counted_openmap<int, std::string> x = {
 		{ 1, "one" },
 		{ 2, "two" },
 		{ 3, "three" },
@@ -951,9 +1010,9 @@ TEST(sh_openmap, cbegin_cend)
 	EXPECT_EQ(key_sum, 10);
 	EXPECT_EQ(value_sum, 193);
 }
-TEST(sh_openmap, clear)
+TEST_F(sh_openmap, clear)
 {
-	openmap<int, std::string> x = {
+	counted_openmap<int, std::string> x = {
 		{ 1, "one" },
 		{ 2, "two" },
 		{ 3, "three" },
@@ -974,9 +1033,9 @@ TEST(sh_openmap, clear)
 	}
 	EXPECT_EQ(x.size(), 0u);
 }
-TEST(sh_openmap, swap)
+TEST_F(sh_openmap, swap)
 {
-	openmap<int, std::string> y, x = {
+	counted_openmap<int, std::string> y, x = {
 		{ 1, "one" },
 		{ 2, "two" },
 		{ 3, "three" },
@@ -997,9 +1056,9 @@ TEST(sh_openmap, swap)
 	EXPECT_FALSE(y.empty());
 	EXPECT_EQ(y.size(), 4u);
 }
-TEST(sh_openmap, swap_iterator)
+TEST_F(sh_openmap, swap_iterator)
 {
-	openmap<int, std::string> y, x = { { 1, "one" } };
+	counted_openmap<int, std::string> y, x = { { 1, "one" } };
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 1u);
 	EXPECT_TRUE(y.empty());
@@ -1021,7 +1080,7 @@ TEST(sh_openmap, swap_iterator)
 	EXPECT_EQ(it->first, 1u);
 	EXPECT_EQ(it->second, "one");
 }
-TEST(sh_openmap, swap_alloc)
+TEST_F(sh_openmap, swap_alloc)
 {
 	{
 		const std::initializer_list<std::pair<int, std::string>> l = {
@@ -1138,18 +1197,18 @@ TEST(sh_openmap, swap_alloc)
 		}
 	}
 }
-TEST(sh_openmap, reserve)
+TEST_F(sh_openmap, reserve)
 {
-	openmap<int, std::string> x(16);
+	counted_openmap<int, std::string> x(16);
 	x.max_load_factor(1.0);
 	ASSERT_EQ(x.bucket_count(), 16u);
 
 	x.reserve(32);
 	ASSERT_EQ(x.bucket_count(), 32u);
 }
-TEST(sh_openmap, rehash)
+TEST_F(sh_openmap, rehash)
 {
-	openmap<int, std::string> x(32);
+	counted_openmap<int, std::string> x(32);
 	x.max_load_factor(1.0f);
 	ASSERT_EQ(x.bucket_count(), 32u);
 
@@ -1184,9 +1243,9 @@ TEST(sh_openmap, rehash)
 		ASSERT_TRUE(x.contains(i));
 	}
 }
-TEST(sh_openmap, insert)
+TEST_F(sh_openmap, insert)
 {
-	openmap<int, std::string> x(4);
+	counted_openmap<int, std::string> x(4);
 	{
 		const std::pair<int, std::string> value(1, "one");
 		const auto it = x.insert(value);
@@ -1252,9 +1311,9 @@ TEST(sh_openmap, insert)
 	}
 	EXPECT_EQ(x.size(), 6u);
 }
-TEST(sh_openmap, insert_or_assign)
+TEST_F(sh_openmap, insert_or_assign)
 {
-	openmap<int, std::string> x(4);
+	counted_openmap<int, std::string> x(4);
 	{
 		const auto it = x.insert_or_assign(1, "one");
 		EXPECT_TRUE(it.second);
@@ -1281,9 +1340,9 @@ TEST(sh_openmap, insert_or_assign)
 	}
 	EXPECT_EQ(x.size(), 3u);
 }
-TEST(sh_openmap, emplace)
+TEST_F(sh_openmap, emplace)
 {
-	openmap<int, std::string> x(4);
+	counted_openmap<int, std::string> x(4);
 	{
 		const auto it = x.emplace(1, "one");
 		EXPECT_TRUE(it.second);
@@ -1298,7 +1357,7 @@ TEST(sh_openmap, emplace)
 	}
 	ASSERT_EQ(x.size(), 1u);
 }
-TEST(sh_openmap, emplace_transparent)
+TEST_F(sh_openmap, emplace_transparent)
 {
 	std::uint32_t hashed_normally = 0, hashed_transparently = 0;
 	openmap<int, int, transparent_hash<int>, std::equal_to<>> x{
@@ -1313,9 +1372,9 @@ TEST(sh_openmap, emplace_transparent)
 	x.emplace(static_cast<unsigned short>(2), 200);
 	EXPECT_GE(hashed_transparently, 1u);
 }
-TEST(sh_openmap, emplace_hint)
+TEST_F(sh_openmap, emplace_hint)
 {
-	openmap<int, std::string> x(4);
+	counted_openmap<int, std::string> x(4);
 
 	const auto hint = x.try_emplace(1, "one");
 	ASSERT_TRUE(hint.second);
@@ -1329,9 +1388,9 @@ TEST(sh_openmap, emplace_hint)
 	}
 	ASSERT_EQ(x.size(), 2u);
 }
-TEST(sh_openmap, try_emplace)
+TEST_F(sh_openmap, try_emplace)
 {
-	openmap<int, std::string> x(4);
+	counted_openmap<int, std::string> x(4);
 	{
 		const auto it = x.try_emplace(1, "one");
 		EXPECT_TRUE(it.second);
@@ -1346,7 +1405,7 @@ TEST(sh_openmap, try_emplace)
 	}
 	ASSERT_EQ(x.size(), 1u);
 }
-TEST(sh_openmap, try_emplace_transparent)
+TEST_F(sh_openmap, try_emplace_transparent)
 {
 	std::uint32_t used_normally = 0, used_transparently = 0;
 	openmap<int, int, transparent_hash<int>, std::equal_to<>> x(4, transparent_hash<int>{ used_normally, used_transparently });
@@ -1358,9 +1417,9 @@ TEST(sh_openmap, try_emplace_transparent)
 	x.try_emplace(static_cast<unsigned short>(2), 200);
 	EXPECT_GE(used_transparently, 1u);
 }
-TEST(sh_openmap, try_emplace_hint)
+TEST_F(sh_openmap, try_emplace_hint)
 {
-	openmap<int, std::string> x(4);
+	counted_openmap<int, std::string> x(4);
 
 	const auto hint = x.try_emplace(1, "one");
 	ASSERT_TRUE(hint.second);
@@ -1374,7 +1433,7 @@ TEST(sh_openmap, try_emplace_hint)
 	}
 	ASSERT_EQ(x.size(), 2u);
 }
-TEST(sh_openmap, try_emplace_hint_transparent)
+TEST_F(sh_openmap, try_emplace_hint_transparent)
 {
 	std::uint32_t used_normally = 0, used_transparently = 0;
 	openmap<int, int, transparent_hash<int>, std::equal_to<>> x(4, transparent_hash<int>{ used_normally, used_transparently });
@@ -1386,9 +1445,9 @@ TEST(sh_openmap, try_emplace_hint_transparent)
 	x.try_emplace_hint(x.end(), static_cast<unsigned short>(2), 200);
 	EXPECT_GE(used_transparently, 1u);
 }
-TEST(sh_openmap, erase)
+TEST_F(sh_openmap, erase)
 {
-	openmap<int, std::string> x = {
+	counted_openmap<int, std::string> x = {
 		{ 1, "one" },
 		{ 2, "two" },
 		{ 3, "three" },
@@ -1415,7 +1474,7 @@ TEST(sh_openmap, erase)
 	EXPECT_EQ(x.size(), 0u);
 	EXPECT_TRUE(x.empty());
 }
-TEST(sh_openmap, erase_transparent)
+TEST_F(sh_openmap, erase_transparent)
 {
 	std::uint32_t used_normally = 0, used_transparently = 0;
 	openmap<int, int, transparent_hash<int>, std::equal_to<>> x{
@@ -1434,7 +1493,7 @@ TEST(sh_openmap, erase_transparent)
 	x.erase(static_cast<unsigned short>(2));
 	EXPECT_GE(used_transparently, 1u);
 }
-TEST(sh_openmap, erase_range)
+TEST_F(sh_openmap, erase_range)
 {
 	openmap<std::size_t, std::size_t> x;
 
@@ -1464,9 +1523,9 @@ TEST(sh_openmap, erase_range)
 	EXPECT_FALSE(x.contains(front_key));
 	EXPECT_FALSE(x.contains(back_key));
 }
-TEST(sh_openmap, erase_continue)
+TEST_F(sh_openmap, erase_continue)
 {
-	openmap<int, std::string> x = {
+	counted_openmap<int, std::string> x = {
 		{ 1, "one" },
 		{ 2, "two" },
 		{ 3, "three" },
@@ -1502,7 +1561,7 @@ TEST(sh_openmap, erase_continue)
 	EXPECT_EQ(x.size(), 0u);
 	EXPECT_TRUE(x.empty());
 }
-TEST(sh_openmap, erase_continue_range)
+TEST_F(sh_openmap, erase_continue_range)
 {
 	openmap<std::size_t, std::size_t> x;
 
@@ -1534,9 +1593,9 @@ TEST(sh_openmap, erase_continue_range)
 	EXPECT_FALSE(x.contains(front_key));
 	EXPECT_FALSE(x.contains(back_key));
 }
-TEST(sh_openmap, operator_index)
+TEST_F(sh_openmap, operator_index)
 {
-	openmap<int, std::string> x;
+	counted_openmap<int, std::string> x;
 	ASSERT_TRUE(x.empty());
 	ASSERT_EQ(x.size(), 0u);
 
@@ -1550,7 +1609,7 @@ TEST(sh_openmap, operator_index)
 	EXPECT_TRUE(x.contains(1));
 	EXPECT_EQ(x.at(1), "one");
 }
-TEST(sh_openmap, operator_index_transparent)
+TEST_F(sh_openmap, operator_index_transparent)
 {
 	std::uint32_t used_normally = 0, used_transparently = 0;
 	openmap<int, int, transparent_hash<int>, std::equal_to<>> x{
@@ -1569,9 +1628,9 @@ TEST(sh_openmap, operator_index_transparent)
 	x[static_cast<unsigned short>(2)];
 	EXPECT_GE(used_transparently, 1u);
 }
-TEST(sh_openmap, at)
+TEST_F(sh_openmap, at)
 {
-	openmap<int, std::string> x = {
+	counted_openmap<int, std::string> x = {
 		{ 1, "one" },
 		{ 2, "two" },
 	};
@@ -1581,7 +1640,7 @@ TEST(sh_openmap, at)
 	EXPECT_EQ(x.at(1), "one");
 	EXPECT_THROW(x.at(0), std::out_of_range);
 }
-TEST(sh_openmap, at_transparent)
+TEST_F(sh_openmap, at_transparent)
 {
 	std::uint32_t used_normally = 0, used_transparently = 0;
 	openmap<int, int, transparent_hash<int>, std::equal_to<>> x{
@@ -1600,9 +1659,9 @@ TEST(sh_openmap, at_transparent)
 	x.at(static_cast<unsigned short>(2));
 	EXPECT_GE(used_transparently, 1u);
 }
-TEST(sh_openmap, count)
+TEST_F(sh_openmap, count)
 {
-	openmap<int, std::string> x = {
+	counted_openmap<int, std::string> x = {
 		{ 1, "one" },
 		{ 2, "two" },
 		{ 3, "three" },
@@ -1617,7 +1676,7 @@ TEST(sh_openmap, count)
 		EXPECT_EQ(x.count(i), 1u);
 	}
 }
-TEST(sh_openmap, count_transparent)
+TEST_F(sh_openmap, count_transparent)
 {
 	std::uint32_t used_normally = 0, used_transparently = 0;
 	openmap<int, int, transparent_hash<int>, std::equal_to<>> x{
@@ -1636,9 +1695,9 @@ TEST(sh_openmap, count_transparent)
 	x.count(static_cast<unsigned short>(2));
 	EXPECT_GE(used_transparently, 1u);
 }
-TEST(sh_openmap, contains)
+TEST_F(sh_openmap, contains)
 {
-	openmap<int, std::string> x = {
+	counted_openmap<int, std::string> x = {
 		{ 1, "one" },
 		{ 2, "two" },
 		{ 3, "three" },
@@ -1652,7 +1711,7 @@ TEST(sh_openmap, contains)
 		EXPECT_TRUE(x.contains(i));
 	}
 }
-TEST(sh_openmap, contains_transparent)
+TEST_F(sh_openmap, contains_transparent)
 {
 	std::uint32_t used_normally = 0, used_transparently = 0;
 	openmap<int, int, transparent_hash<int>, std::equal_to<>> x{
@@ -1671,9 +1730,9 @@ TEST(sh_openmap, contains_transparent)
 	x.contains(static_cast<unsigned short>(2));
 	EXPECT_GE(used_transparently, 1u);
 }
-TEST(sh_openmap, find)
+TEST_F(sh_openmap, find)
 {
-	openmap<int, std::string> x = {
+	counted_openmap<int, std::string> x = {
 		{ 1, "one" },
 		{ 2, "two" },
 		{ 3, "three" },
@@ -1688,10 +1747,10 @@ TEST(sh_openmap, find)
 		EXPECT_NE(x.find(i), x.end());
 	}
 }
-TEST(sh_openmap, find_transparent)
+TEST_F(sh_openmap, find_transparent)
 {
 	std::uint32_t used_normally = 0, used_transparently = 0;
-	openmap<int, int, transparent_hash<int>, std::equal_to<>> x{
+	counted_openmap<int, int, transparent_hash<int>, std::equal_to<>> x{
 		{
 			{ 1, 100 },
 			{ 2, 200 },
@@ -1707,9 +1766,9 @@ TEST(sh_openmap, find_transparent)
 	x.find(static_cast<unsigned short>(2));
 	EXPECT_GE(used_transparently, 1u);
 }
-TEST(sh_openmap, equal_range)
+TEST_F(sh_openmap, equal_range)
 {
-	openmap<int, std::string> x = {
+	counted_openmap<int, std::string> x = {
 		{ 1, "one" },
 		{ 2, "two" },
 		{ 3, "three" },
@@ -1733,15 +1792,15 @@ TEST(sh_openmap, equal_range)
 		EXPECT_EQ(range.second->second, "two");
 	}
 }
-TEST(sh_openmap, ctor_move_use)
+TEST_F(sh_openmap, ctor_move_use)
 {
-	openmap<int, std::string> x(2);
+	counted_openmap<int, std::string> x(2);
 	x.try_emplace(0, "zero");
 	x.try_emplace(1, "one");
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 2u);
 
-	openmap<int, std::string> y(std::move(x));
+	counted_openmap<int, std::string> y(std::move(x));
 	EXPECT_FALSE(y.empty());
 	EXPECT_EQ(y.size(), 2u);
 	EXPECT_EQ(y.at(0), "zero");
@@ -1756,9 +1815,9 @@ TEST(sh_openmap, ctor_move_use)
 	EXPECT_EQ(x.at(2), "two");
 	EXPECT_EQ(x.at(3), "three");
 }
-TEST(sh_openmap, narrow)
+TEST_F(sh_openmap, narrow)
 {
-	openmap<int, int> x(1024);
+	counted_openmap<int, int> x(1024);
 
 	for (int i = 0; i < 512; ++i)
 	{
@@ -1776,9 +1835,9 @@ TEST(sh_openmap, narrow)
 		EXPECT_EQ(it->second, i);
 	}
 }
-TEST(sh_openmap, widen)
+TEST_F(sh_openmap, widen)
 {
-	openmap<int, int, thousands_hash<int>> x(1024);
+	counted_openmap<int, int, thousands_hash<int>> x(1024);
 
 	for (int i = 0; i < 512; ++i)
 	{
@@ -1796,7 +1855,7 @@ TEST(sh_openmap, widen)
 		EXPECT_EQ(it->second, i);
 	}
 }
-TEST(sh_openmap, widen_throw)
+TEST_F(sh_openmap, widen_throw)
 {
 	bool can_allocate = true;
 	openmap<int, int, thousands_hash<int>, std::equal_to<int>, unreliable_allocator<std::pair<int, int>>> x(1024, unreliable_allocator<std::pair<int, int>>(can_allocate));
@@ -1859,9 +1918,9 @@ TEST(sh_openmap, widen_throw)
 	}
 #endif
 }
-TEST(sh_openmap, widen_and_continue_emplace)
+TEST_F(sh_openmap, widen_and_continue_emplace)
 {
-	openmap<int, int, thousands_hash<int>> x(1024);
+	counted_openmap<int, int, thousands_hash<int>> x(1024);
 
 	// Starts inserting in bucket 632.
 	for (int i = 1000; i < 1254; ++i)
@@ -1926,21 +1985,21 @@ TEST(sh_openmap, widen_and_continue_emplace)
 		EXPECT_EQ(it->second, i);
 	}
 }
-TEST(sh_openmap, ctor_default_zero_allocation)
+TEST_F(sh_openmap, ctor_default_zero_allocation)
 {
-	general_allocations::reset();
-	ASSERT_EQ(general_allocations::m_current, 0u);
+	general_allocations::get().reset();
+	ASSERT_EQ(general_allocations::get().m_current, 0u);
 	openmap<int, int, std::hash<int>, std::equal_to<int>, counted_allocator<int>> x;
-	EXPECT_EQ(general_allocations::m_current, 0u);
+	EXPECT_EQ(general_allocations::get().m_current, 0u);
 }
-TEST(sh_openmap, ctor_empty_zero_allocation)
+TEST_F(sh_openmap, ctor_empty_zero_allocation)
 {
-	general_allocations::reset();
-	ASSERT_EQ(general_allocations::m_current, 0u);
+	general_allocations::get().reset();
+	ASSERT_EQ(general_allocations::get().m_current, 0u);
 	openmap<int, int, std::hash<int>, std::equal_to<int>, counted_allocator<int>> x(0);
-	EXPECT_EQ(general_allocations::m_current, 0u);
+	EXPECT_EQ(general_allocations::get().m_current, 0u);
 }
-TEST(sh_openmap, ctor_dtor_test)
+TEST_F(sh_openmap, ctor_dtor_test)
 {
 	class RefInt final
 	{
@@ -2055,10 +2114,10 @@ TEST(sh_openmap, ctor_dtor_test)
 	using value_type = sh::robinhood::mutable_key_value_pair<RefInt, RefInt>;
 	using narrow_info_type = sh::robinhood::info<std::uint8_t>;
 
-	general_allocations::reset();
-	ASSERT_EQ(general_allocations::m_current, 0u);
-	ASSERT_EQ(typed_allocations<value_type>::m_current, 0u);
-	ASSERT_EQ(typed_allocations<narrow_info_type>::m_current, 0u);
+	general_allocations::get().reset();
+	ASSERT_EQ(general_allocations::get().m_current, 0u);
+	ASSERT_EQ(typed_allocations<value_type>::get().m_current, 0u);
+	ASSERT_EQ(typed_allocations<narrow_info_type>::get().m_current, 0u);
 
 	{
 		// Sized as to force rehash numerous times.
@@ -2107,24 +2166,17 @@ TEST(sh_openmap, ctor_dtor_test)
 	EXPECT_EQ(value_copies, 0);
 	EXPECT_EQ(key_references, 0);
 	EXPECT_EQ(value_references, 0);
-	EXPECT_EQ(general_allocations::m_current, 0u);
-	EXPECT_EQ(typed_allocations<value_type>::m_current, 0u);
-	EXPECT_EQ(typed_allocations<narrow_info_type>::m_current, 0u);
+	EXPECT_EQ(general_allocations::get().m_current, 0u);
+	EXPECT_EQ(typed_allocations<value_type>::get().m_current, 0u);
+	EXPECT_EQ(typed_allocations<narrow_info_type>::get().m_current, 0u);
 
 	if constexpr (DEBUG_VERBOSE)
 	{
-		std::cerr << "general_allocations\n"
-			"\tallocate calls:   " << general_allocations::m_allocate_calls << "\n"
-			"\tdeallocate calls: " << general_allocations::m_deallocate_calls << "\n"
-			"\tpeak:             " << general_allocations::m_peak << " bytes\n";
-		std::cerr << "typed_allocations<value_type> (size " << sizeof(value_type) << ", align " << alignof(value_type) << ")\n"
-			"\tallocate calls:   " << typed_allocations<value_type>::m_allocate_calls << "\n"
-			"\tdeallocate calls: " << typed_allocations<value_type>::m_deallocate_calls << "\n"
-			"\tpeak:             " << typed_allocations<value_type>::m_peak << " (" << (sizeof(value_type) * typed_allocations<value_type>::m_peak) << " bytes)\n";
-		std::cerr << "typed_allocations<narrow_info_type> (size " << sizeof(narrow_info_type) << ", align " << alignof(narrow_info_type) << ")\n"
-			"\tallocate calls:   " << typed_allocations<narrow_info_type>::m_allocate_calls << "\n"
-			"\tdeallocate calls: " << typed_allocations<narrow_info_type>::m_deallocate_calls << "\n"
-			"\tpeak:             " << typed_allocations<narrow_info_type>::m_peak << " (" << (sizeof(narrow_info_type) * typed_allocations<narrow_info_type>::m_peak) << " bytes)\n";
+		std::cerr << "general_allocations\n\t" << general_allocations::get() << '\n';
+		std::cerr << "typed_allocations<value_type> (size " << sizeof(value_type) << ", align " << alignof(value_type) << ")\n\t"
+			<< typed_allocations<value_type>::get() << '\n';
+		std::cerr << "typed_allocations<narrow_info_type> (size " << sizeof(narrow_info_type) << ", align " << alignof(narrow_info_type) << ")\n\t"
+			<< typed_allocations<narrow_info_type>::get() << '\n';
 	}
 }
 

@@ -72,39 +72,41 @@ namespace
 		}
 	}
 
-	struct general_allocations
+	struct allocations
 	{
-		static std::size_t m_current;
-		static std::size_t m_peak;
-		static std::size_t m_allocate_calls;
-		static std::size_t m_deallocate_calls;
+		std::size_t m_current{ 0 };
+		std::size_t m_peak{ 0 };
+		std::size_t m_allocate_calls{ 0 };
+		std::size_t m_deallocate_calls{ 0 };
+		std::size_t m_construct_calls{ 0 };
+		std::size_t m_destroy_calls{ 0 };
 
-		static void reset()
+		void reset()
 		{
-			m_current = m_peak = m_allocate_calls = m_deallocate_calls = 0;
+			*this = allocations{};
+		}
+		friend std::ostream& operator<<(std::ostream& ostr, const allocations& all)
+		{
+			return ostr << "current " << all.m_current << " bytes"
+				", peak " << all.m_peak << " bytes"
+				", allocate calls " << all.m_allocate_calls <<
+				", deallocate calls " << all.m_deallocate_calls <<
+				", construct calls " << all.m_construct_calls <<
+				", destroy calls " << all.m_destroy_calls;
 		}
 	};
-	std::size_t general_allocations::m_current = 0;
-	std::size_t general_allocations::m_peak = 0;
-	std::size_t general_allocations::m_allocate_calls = 0;
-	std::size_t general_allocations::m_deallocate_calls = 0;
 
 	template <typename T>
-	struct typed_allocations
+	struct typed_allocations : allocations
 	{
-		static std::size_t m_current;
-		static std::size_t m_peak;
-		static std::size_t m_allocate_calls;
-		static std::size_t m_deallocate_calls;
+		static allocations& get()
+		{
+			static allocations instance;
+			return instance;
+		}
 	};
-	template <typename T>
-	std::size_t typed_allocations<T>::m_current = 0;
-	template <typename T>
-	std::size_t typed_allocations<T>::m_peak = 0;
-	template <typename T>
-	std::size_t typed_allocations<T>::m_allocate_calls = 0;
-	template <typename T>
-	std::size_t typed_allocations<T>::m_deallocate_calls = 0;
+
+	using general_allocations = typed_allocations<void>;
 
 	template <typename T>
 	class counted_allocator : private std::allocator<T>
@@ -136,34 +138,56 @@ namespace
 
 		[[nodiscard]] constexpr T* allocate(const std::size_t n)
 		{
-			general_allocations::m_current += sizeof(T) * n;
-			general_allocations::m_allocate_calls += 1;
-			general_allocations::m_peak = std::max(general_allocations::m_peak, general_allocations::m_current);
+			general_allocations::get().m_current += sizeof(T) * n;
+			general_allocations::get().m_allocate_calls += 1;
+			general_allocations::get().m_peak = std::max(general_allocations::get().m_peak, general_allocations::get().m_current);
 
-			typed_allocations<T>::m_current += n;
-			typed_allocations<T>::m_allocate_calls += 1;
-			typed_allocations<T>::m_peak = std::max(typed_allocations<T>::m_peak, typed_allocations<T>::m_current);
+			typed_allocations<T>::get().m_current += n;
+			typed_allocations<T>::get().m_allocate_calls += 1;
+			typed_allocations<T>::get().m_peak = std::max(typed_allocations<T>::get().m_peak, typed_allocations<T>::get().m_current);
 			return this->std::allocator<T>::allocate(n);
 		}
 		constexpr void deallocate(T* const p, const std::size_t n)
 		{
-			general_allocations::m_current -= sizeof(T) * n;
-			general_allocations::m_deallocate_calls += 1;
-			typed_allocations<T>::m_current -= n;
-			typed_allocations<T>::m_deallocate_calls += 1;
+			general_allocations::get().m_current -= sizeof(T) * n;
+			general_allocations::get().m_deallocate_calls += 1;
+			typed_allocations<T>::get().m_current -= n;
+			typed_allocations<T>::get().m_deallocate_calls += 1;
 			this->std::allocator<T>::deallocate(p, n);
+		}
+		template <typename U, typename... Args>
+		void construct(U* const p, Args&&... args)
+		{
+			this->std::allocator<T>::template construct<U>(p, std::forward<Args>(args)...);
+			if constexpr (std::is_trivially_destructible_v<U> == false)
+			{
+				general_allocations::get().m_construct_calls += 1;
+				typed_allocations<T>::get().m_construct_calls += 1;
+			}
+		}
+		template <typename U>
+		void destroy(U* const p)
+		{
+			if constexpr (std::is_trivially_destructible_v<U> == false)
+			{
+				general_allocations::get().m_destroy_calls += 1;
+				typed_allocations<T>::get().m_destroy_calls += 1;
+			}
+			this->std::allocator<T>::template destroy<U>(p);
 		}
 	};
 
 	template <typename T, bool Propagate = true>
-	struct stateful_allocator : private std::allocator<T>
+	struct stateful_allocator : private counted_allocator<T>
 	{
-		using allocator_traits = std::allocator_traits<std::allocator<T>>;
+		using allocator_traits = std::allocator_traits<counted_allocator<T>>;
 		using value_type = typename allocator_traits::value_type;
 		using size_type = typename allocator_traits::size_type;
 		using difference_type = typename allocator_traits::difference_type;
-		using std::allocator<T>::allocate;
-		using std::allocator<T>::deallocate;
+		using counted_allocator<T>::allocate;
+		using counted_allocator<T>::deallocate;
+		using counted_allocator<T>::construct;
+		using counted_allocator<T>::destroy;
 
 		template <typename U>
 		struct rebind
@@ -206,9 +230,9 @@ namespace
 	};
 
 	template <typename T>
-	struct unreliable_allocator : private std::allocator<T>
+	struct unreliable_allocator : private counted_allocator<T>
 	{
-		using allocator_traits = std::allocator_traits<std::allocator<T>>;
+		using allocator_traits = std::allocator_traits<counted_allocator<T>>;
 		using value_type = typename allocator_traits::value_type;
 		using size_type = typename allocator_traits::size_type;
 		using difference_type = typename allocator_traits::difference_type;
@@ -255,9 +279,11 @@ namespace
 			{
 				throw std::bad_alloc();
 			}
-			return this->std::allocator<T>::allocate(n);
+			return this->counted_allocator<T>::allocate(n);
 		}
-		using std::allocator<T>::deallocate;
+		using counted_allocator<T>::deallocate;
+		using counted_allocator<T>::construct;
+		using counted_allocator<T>::destroy;
 
 		const bool* m_can_allocate;
 	};
@@ -299,44 +325,76 @@ namespace
 			return value / 1000;
 		}
 	};
+
+	// Fixture
+	class sh_openset : public ::testing::Test
+	{
+	protected:
+		void SetUp() override
+		{
+			general_allocations::get() = allocations{};
+			ASSERT_EQ(0u, general_allocations::get().m_current);
+			ASSERT_EQ(0u, general_allocations::get().m_allocate_calls);
+			ASSERT_EQ(0u, general_allocations::get().m_deallocate_calls);
+			ASSERT_EQ(0u, general_allocations::get().m_construct_calls);
+			ASSERT_EQ(0u, general_allocations::get().m_destroy_calls);
+		}
+		void TearDown() override
+		{
+			EXPECT_EQ(0u, general_allocations::get().m_current);
+			EXPECT_EQ(general_allocations::get().m_allocate_calls, general_allocations::get().m_deallocate_calls);
+			EXPECT_EQ(general_allocations::get().m_construct_calls, general_allocations::get().m_destroy_calls);
+			if constexpr (DEBUG_VERBOSE)
+			{
+				std::cout << '\t' << general_allocations::get() << std::endl;
+			}
+		}
+	};
+
+	template <typename Key,
+		typename Hash = std::hash<Key>,
+		typename KeyEqual = std::equal_to<Key>,
+		typename Allocator = counted_allocator<Key>,
+		typename SizeType = sh::robinhood::default_size_type>
+	using counted_openset = openset<Key, Hash, KeyEqual, Allocator, SizeType>;
 } // anonymous namespace
 
-TEST(sh_openset, ctor_default)
+TEST_F(sh_openset, ctor_default)
 {
-	openset<int> x;
+	counted_openset<int> x;
 	EXPECT_TRUE(x.empty());
 	EXPECT_EQ(x.size(), 0u);
 }
-TEST(sh_openset, ctor_alloc)
+TEST_F(sh_openset, ctor_alloc)
 {
 	using allocator_type = stateful_allocator<int>;
 	openset<int, std::hash<int>, std::equal_to<int>, allocator_type> x(allocator_type(123));
 	EXPECT_TRUE(x.empty());
 	EXPECT_EQ(x.size(), 0u);
 }
-TEST(sh_openset, ctor_buckets)
+TEST_F(sh_openset, ctor_buckets)
 {
-	openset<int> x(7);
+	counted_openset<int> x(7);
 	EXPECT_TRUE(x.empty());
 	EXPECT_EQ(x.size(), 0u);
 	EXPECT_GE(x.bucket_count(), 7u);
 }
-TEST(sh_openset, ctor_copy)
+TEST_F(sh_openset, ctor_copy)
 {
-	openset<int> x(7);
+	counted_openset<int> x(7);
 	x.emplace(1);
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 1u);
 	ASSERT_GE(x.bucket_count(), 1u);
 	ASSERT_TRUE(x.contains(1));
 
-	openset<int> y(x);
+	counted_openset<int> y(x);
 	EXPECT_FALSE(y.empty());
 	EXPECT_EQ(y.size(), 1u);
 	EXPECT_EQ(y.bucket_count(), x.bucket_count());
 	EXPECT_TRUE(y.contains(1));
 }
-TEST(sh_openset, ctor_copy_alloc)
+TEST_F(sh_openset, ctor_copy_alloc)
 {
 	using allocator_type = stateful_allocator<int>;
 	using set_type = openset<int, std::hash<int>, std::equal_to<int>, allocator_type>;
@@ -373,9 +431,9 @@ TEST(sh_openset, ctor_copy_alloc)
 		EXPECT_TRUE(y.contains(1));
 	}
 }
-TEST(sh_openset, ctor_move)
+TEST_F(sh_openset, ctor_move)
 {
-	openset<int> x(7);
+	counted_openset<int> x(7);
 	x.emplace(1);
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 1u);
@@ -383,15 +441,15 @@ TEST(sh_openset, ctor_move)
 	ASSERT_GE(x_bucket_count, 1u);
 	ASSERT_TRUE(x.contains(1));
 
-	openset<int> y(std::move(x));
+	counted_openset<int> y(std::move(x));
 	EXPECT_FALSE(y.empty());
 	EXPECT_EQ(y.size(), 1u);
 	EXPECT_EQ(y.bucket_count(), x_bucket_count);
 	EXPECT_TRUE(y.contains(1));
 }
-TEST(sh_openset, ctor_move_iterator)
+TEST_F(sh_openset, ctor_move_iterator)
 {
-	openset<int> x = { 1 };
+	counted_openset<int> x = { 1 };
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 1u);
 
@@ -399,7 +457,7 @@ TEST(sh_openset, ctor_move_iterator)
 	ASSERT_NE(it, x.end());
 	ASSERT_EQ(*it, 1u);
 
-	openset<int> y{ std::move(x) };
+	counted_openset<int> y{ std::move(x) };
 	EXPECT_TRUE(x.empty());
 	EXPECT_EQ(x.size(), 0u);
 	EXPECT_FALSE(y.empty());
@@ -409,7 +467,7 @@ TEST(sh_openset, ctor_move_iterator)
 	ASSERT_NE(it, y.end());
 	EXPECT_EQ(*it, 1u);
 }
-TEST(sh_openset, ctor_move_alloc)
+TEST_F(sh_openset, ctor_move_alloc)
 {
 	using allocator_type = stateful_allocator<int>;
 	using set_type = openset<int, std::hash<int>, std::equal_to<int>, allocator_type>;
@@ -448,11 +506,11 @@ TEST(sh_openset, ctor_move_alloc)
 		EXPECT_TRUE(y.contains(1));
 	}
 }
-TEST(sh_openset, ctor_range)
+TEST_F(sh_openset, ctor_range)
 {
 	const std::vector<int> values = { 1, 2, 3 };
 
-	openset<int> x(values.begin(), values.end());
+	counted_openset<int> x(values.begin(), values.end());
 	EXPECT_FALSE(x.empty());
 	EXPECT_EQ(x.size(), values.size());
 	EXPECT_GE(x.bucket_count(), 1u);
@@ -461,11 +519,11 @@ TEST(sh_openset, ctor_range)
 		EXPECT_TRUE(x.contains(item));
 	}
 }
-TEST(sh_openset, ctor_initializer_list)
+TEST_F(sh_openset, ctor_initializer_list)
 {
 	const std::initializer_list<int> ilist = { 1, 2, 3 };
 
-	openset<int> x(ilist.begin(), ilist.end());
+	counted_openset<int> x(ilist.begin(), ilist.end());
 	EXPECT_FALSE(x.empty());
 	EXPECT_EQ(x.size(), ilist.size());
 	EXPECT_GE(x.bucket_count(), 1u);
@@ -474,16 +532,16 @@ TEST(sh_openset, ctor_initializer_list)
 		EXPECT_TRUE(x.contains(item));
 	}
 }
-TEST(sh_openset, operator_assign)
+TEST_F(sh_openset, operator_assign)
 {
-	openset<int> x(7);
+	counted_openset<int> x(7);
 	x.emplace(1);
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 1u);
 	ASSERT_GE(x.bucket_count(), 1u);
 	ASSERT_TRUE(x.contains(1));
 
-	openset<int> y;
+	counted_openset<int> y;
 	y = x;
 	EXPECT_FALSE(y.empty());
 	EXPECT_EQ(y.size(), 1u);
@@ -496,9 +554,9 @@ TEST(sh_openset, operator_assign)
 	EXPECT_EQ(y.bucket_count(), x.bucket_count());
 	EXPECT_TRUE(y.contains(1));
 }
-TEST(sh_openset, operator_assign_iterator)
+TEST_F(sh_openset, operator_assign_iterator)
 {
-	openset<int> y, x = { 1 };
+	counted_openset<int> y, x = { 1 };
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 1u);
 	EXPECT_TRUE(y.empty());
@@ -518,7 +576,7 @@ TEST(sh_openset, operator_assign_iterator)
 	ASSERT_NE(it, y.end());
 	EXPECT_EQ(*it, 1u);
 }
-TEST(sh_openset, operator_assign_alloc)
+TEST_F(sh_openset, operator_assign_alloc)
 {
 	{
 		constexpr bool propagate = true;
@@ -633,7 +691,7 @@ TEST(sh_openset, operator_assign_alloc)
 		}
 	}
 }
-TEST(sh_openset, operator_assign_move)
+TEST_F(sh_openset, operator_assign_move)
 {
 	openset<std::string> x(7);
 	x.emplace("one");
@@ -652,7 +710,7 @@ TEST(sh_openset, operator_assign_move)
 
 	y = std::move(y);
 }
-TEST(sh_openset, operator_assign_move_alloc)
+TEST_F(sh_openset, operator_assign_move_alloc)
 {
 	{
 		constexpr bool propagate = true;
@@ -773,9 +831,9 @@ TEST(sh_openset, operator_assign_move_alloc)
 		}
 	}
 }
-TEST(sh_openset, bucket)
+TEST_F(sh_openset, bucket)
 {
-	openset<int> x(2);
+	counted_openset<int> x(2);
 	x.emplace(1);
 	x.emplace(2);
 	x.emplace(3);
@@ -790,7 +848,7 @@ TEST(sh_openset, bucket)
 		EXPECT_EQ(x.bucket(i), index);
 	}
 }
-TEST(sh_openset, bucket_size)
+TEST_F(sh_openset, bucket_size)
 {
 	struct direct_int_hash
 	{
@@ -799,7 +857,7 @@ TEST(sh_openset, bucket_size)
 			return value;
 		}
 	};
-	openset<int> x(8);
+	counted_openset<int> x(8);
 	x.emplace(1);
 	x.emplace(2);
 	x.emplace(3);
@@ -828,9 +886,9 @@ TEST(sh_openset, bucket_size)
 		}
 	}
 }
-TEST(sh_openset, load_factor)
+TEST_F(sh_openset, load_factor)
 {
-	openset<int> x(8);
+	counted_openset<int> x(8);
 	ASSERT_FLOAT_EQ(x.load_factor(), 0.0f);
 
 	x.emplace(1);
@@ -840,9 +898,9 @@ TEST(sh_openset, load_factor)
 	x.emplace(3);
 	ASSERT_FLOAT_EQ(x.load_factor(), float(x.size()) / x.bucket_count());
 }
-TEST(sh_openset, max_load_factor)
+TEST_F(sh_openset, max_load_factor)
 {
-	openset<int> x(8);
+	counted_openset<int> x(8);
 	constexpr float max_load_factor = 0.25f;
 	x.max_load_factor(max_load_factor);
 	ASSERT_FLOAT_EQ(x.max_load_factor(), max_load_factor);
@@ -854,15 +912,15 @@ TEST(sh_openset, max_load_factor)
 		ASSERT_LE(x.load_factor(), max_load_factor);
 	}
 }
-TEST(sh_openset, key_eq)
+TEST_F(sh_openset, key_eq)
 {
-	openset<int> x(8);
+	counted_openset<int> x(8);
 	EXPECT_TRUE(x.key_eq()(1, 1));
 	EXPECT_FALSE(x.key_eq()(1, 2));
 }
-TEST(sh_openset, begin_end)
+TEST_F(sh_openset, begin_end)
 {
-	openset<int> x = { 1, 2, 3, 4 };
+	counted_openset<int> x = { 1, 2, 3, 4 };
 
 	int key_sum = 0;
 	for (auto it = x.begin(); it != x.end(); ++it)
@@ -872,9 +930,9 @@ TEST(sh_openset, begin_end)
 	}
 	EXPECT_EQ(key_sum, 10);
 }
-TEST(sh_openset, cbegin_cend)
+TEST_F(sh_openset, cbegin_cend)
 {
-	const openset<int> x = { 1, 2, 3, 4 };
+	const counted_openset<int> x = { 1, 2, 3, 4 };
 
 	int key_sum = 0;
 	for (auto it = x.cbegin(); it != x.cend(); ++it)
@@ -884,9 +942,9 @@ TEST(sh_openset, cbegin_cend)
 	}
 	EXPECT_EQ(key_sum, 10);
 }
-TEST(sh_openset, clear)
+TEST_F(sh_openset, clear)
 {
-	openset<int> x = { 1, 2, 3, 4 };
+	counted_openset<int> x = { 1, 2, 3, 4 };
 	ASSERT_FALSE(x.empty());
 	for (int i = 1; i <= 4; ++i)
 	{
@@ -902,9 +960,9 @@ TEST(sh_openset, clear)
 	}
 	EXPECT_EQ(x.size(), 0u);
 }
-TEST(sh_openset, swap)
+TEST_F(sh_openset, swap)
 {
-	openset<int> y, x = { 1, 2, 3, 4 };
+	counted_openset<int> y, x = { 1, 2, 3, 4 };
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 4u);
 	ASSERT_TRUE(y.empty());
@@ -920,9 +978,9 @@ TEST(sh_openset, swap)
 	EXPECT_FALSE(y.empty());
 	EXPECT_EQ(y.size(), 4u);
 }
-TEST(sh_openset, swap_iterator)
+TEST_F(sh_openset, swap_iterator)
 {
-	openset<int> y, x = { 1 };
+	counted_openset<int> y, x = { 1 };
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 1u);
 	EXPECT_TRUE(y.empty());
@@ -942,7 +1000,7 @@ TEST(sh_openset, swap_iterator)
 	ASSERT_NE(it, y.end());
 	EXPECT_EQ(*it, 1u);
 }
-TEST(sh_openset, swap_alloc)
+TEST_F(sh_openset, swap_alloc)
 {
 	{
 		const std::initializer_list<int> l = { 1, 2, 3, 4 };
@@ -1049,18 +1107,18 @@ TEST(sh_openset, swap_alloc)
 		}
 	}
 }
-TEST(sh_openset, reserve)
+TEST_F(sh_openset, reserve)
 {
-	openset<int> x(2);
+	counted_openset<int> x(2);
 	x.max_load_factor(1.0);
 	ASSERT_EQ(x.bucket_count(), 2u);
 
 	x.reserve(4);
 	ASSERT_EQ(x.bucket_count(), 4u);
 }
-TEST(sh_openset, rehash)
+TEST_F(sh_openset, rehash)
 {
-	openset<int> x(32);
+	counted_openset<int> x(32);
 	x.max_load_factor(1.0f);
 	ASSERT_EQ(x.bucket_count(), 32u);
 
@@ -1095,7 +1153,7 @@ TEST(sh_openset, rehash)
 		ASSERT_TRUE(x.contains(i));
 	}
 }
-TEST(sh_openset, insert)
+TEST_F(sh_openset, insert)
 {
 	openset<std::string> x(4);
 	{
@@ -1142,7 +1200,7 @@ TEST(sh_openset, insert)
 	}
 	EXPECT_EQ(x.size(), 6u);
 }
-TEST(sh_openset, emplace)
+TEST_F(sh_openset, emplace)
 {
 	openset<std::string> x(4);
 	{
@@ -1157,7 +1215,7 @@ TEST(sh_openset, emplace)
 	}
 	ASSERT_EQ(x.size(), 1u);
 }
-TEST(sh_openset, emplace_transparent)
+TEST_F(sh_openset, emplace_transparent)
 {
 	std::uint32_t hashed_normally = 0, hashed_transparently = 0;
 	openset<std::string, transparent_hash<std::string>, std::equal_to<>> x{
@@ -1173,7 +1231,7 @@ TEST(sh_openset, emplace_transparent)
 	x.emplace(two);
 	EXPECT_GE(hashed_transparently, 1u);
 }
-TEST(sh_openset, emplace_hint)
+TEST_F(sh_openset, emplace_hint)
 {
 	openset<std::string> x(4);
 
@@ -1187,9 +1245,9 @@ TEST(sh_openset, emplace_hint)
 	}
 	ASSERT_EQ(x.size(), 2u);
 }
-TEST(sh_openset, erase)
+TEST_F(sh_openset, erase)
 {
-	openset<int> x = { 1, 2, 3, 4 };
+	counted_openset<int> x = { 1, 2, 3, 4 };
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 4u);
 
@@ -1211,7 +1269,7 @@ TEST(sh_openset, erase)
 	EXPECT_EQ(x.size(), 0u);
 	EXPECT_TRUE(x.empty());
 }
-TEST(sh_openset, erase_transparent)
+TEST_F(sh_openset, erase_transparent)
 {
 	std::uint32_t used_normally = 0, used_transparently = 0;
 	openset<int, transparent_hash<int>, std::equal_to<>> x{
@@ -1227,7 +1285,7 @@ TEST(sh_openset, erase_transparent)
 	x.erase(static_cast<unsigned short>(2));
 	EXPECT_GE(used_transparently, 1u);
 }
-TEST(sh_openset, erase_range)
+TEST_F(sh_openset, erase_range)
 {
 	openset<std::size_t> x;
 
@@ -1257,9 +1315,9 @@ TEST(sh_openset, erase_range)
 	EXPECT_FALSE(x.contains(front_key));
 	EXPECT_FALSE(x.contains(back_key));
 }
-TEST(sh_openset, erase_continue)
+TEST_F(sh_openset, erase_continue)
 {
-	openset<int> x = { 1, 2, 3, 4 };
+	counted_openset<int> x = { 1, 2, 3, 4 };
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 4u);
 
@@ -1290,7 +1348,7 @@ TEST(sh_openset, erase_continue)
 	EXPECT_EQ(x.size(), 0u);
 	EXPECT_TRUE(x.empty());
 }
-TEST(sh_openset, erase_continue_range)
+TEST_F(sh_openset, erase_continue_range)
 {
 	openset<std::size_t> x;
 
@@ -1322,9 +1380,9 @@ TEST(sh_openset, erase_continue_range)
 	EXPECT_FALSE(x.contains(front_key));
 	EXPECT_FALSE(x.contains(back_key));
 }
-TEST(sh_openset, count)
+TEST_F(sh_openset, count)
 {
-	openset<int> x = { 1, 2, 3, 4 };
+	counted_openset<int> x = { 1, 2, 3, 4 };
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 4u);
 
@@ -1334,7 +1392,7 @@ TEST(sh_openset, count)
 		EXPECT_EQ(x.count(i), 1u);
 	}
 }
-TEST(sh_openset, count_transparent)
+TEST_F(sh_openset, count_transparent)
 {
 	std::uint32_t used_normally = 0, used_transparently = 0;
 	openset<int, transparent_hash<int>, std::equal_to<>> x{
@@ -1350,9 +1408,9 @@ TEST(sh_openset, count_transparent)
 	x.count(static_cast<unsigned short>(2));
 	EXPECT_GE(used_transparently, 1u);
 }
-TEST(sh_openset, contains)
+TEST_F(sh_openset, contains)
 {
-	openset<int> x = { 1, 2, 3, 4 };
+	counted_openset<int> x = { 1, 2, 3, 4 };
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 4u);
 
@@ -1361,7 +1419,7 @@ TEST(sh_openset, contains)
 		EXPECT_TRUE(x.contains(i));
 	}
 }
-TEST(sh_openset, contains_transparent)
+TEST_F(sh_openset, contains_transparent)
 {
 	std::uint32_t used_normally = 0, used_transparently = 0;
 	openset<int, transparent_hash<int>, std::equal_to<>> x{
@@ -1377,9 +1435,9 @@ TEST(sh_openset, contains_transparent)
 	x.contains(static_cast<unsigned short>(2));
 	EXPECT_GE(used_transparently, 1u);
 }
-TEST(sh_openset, find)
+TEST_F(sh_openset, find)
 {
-	openset<int> x = { 1, 2, 3, 4 };
+	counted_openset<int> x = { 1, 2, 3, 4 };
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 4u);
 
@@ -1389,10 +1447,10 @@ TEST(sh_openset, find)
 		EXPECT_NE(x.find(i), x.end());
 	}
 }
-TEST(sh_openset, find_transparent)
+TEST_F(sh_openset, find_transparent)
 {
 	std::uint32_t used_normally = 0, used_transparently = 0;
-	openset<int, transparent_hash<int>, std::equal_to<>> x{
+	counted_openset<int, transparent_hash<int>, std::equal_to<>> x{
 		{ 1, 2, },
 		2,
 		transparent_hash<int>{ used_normally, used_transparently }
@@ -1405,9 +1463,9 @@ TEST(sh_openset, find_transparent)
 	x.find(static_cast<unsigned short>(2));
 	EXPECT_GE(used_transparently, 1u);
 }
-TEST(sh_openset, equal_range)
+TEST_F(sh_openset, equal_range)
 {
-	openset<int> x = { 1, 2, 3, 4 };
+	counted_openset<int> x = { 1, 2, 3, 4 };
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 4u);
 
@@ -1425,15 +1483,15 @@ TEST(sh_openset, equal_range)
 		EXPECT_EQ(*range.second, 2);
 	}
 }
-TEST(sh_openset, ctor_move_use)
+TEST_F(sh_openset, ctor_move_use)
 {
-	openset<int> x(2);
+	counted_openset<int> x(2);
 	x.emplace(0);
 	x.emplace(1);
 	ASSERT_FALSE(x.empty());
 	ASSERT_EQ(x.size(), 2u);
 
-	openset<int> y(std::move(x));
+	counted_openset<int> y(std::move(x));
 	EXPECT_FALSE(y.empty());
 	EXPECT_EQ(y.size(), 2u);
 	EXPECT_TRUE(y.contains(0));
@@ -1448,9 +1506,9 @@ TEST(sh_openset, ctor_move_use)
 	EXPECT_TRUE(x.contains(2));
 	EXPECT_TRUE(x.contains(3));
 }
-TEST(sh_openset, narrow)
+TEST_F(sh_openset, narrow)
 {
-	openset<int> x(1024);
+	counted_openset<int> x(1024);
 
 	for (int i = 0; i < 512; ++i)
 	{
@@ -1466,9 +1524,9 @@ TEST(sh_openset, narrow)
 		EXPECT_EQ(*it, i);
 	}
 }
-TEST(sh_openset, widen)
+TEST_F(sh_openset, widen)
 {
-	openset<int, thousands_hash<int>> x(1024);
+	counted_openset<int, thousands_hash<int>> x(1024);
 
 	for (int i = 0; i < 512; ++i)
 	{
@@ -1484,7 +1542,7 @@ TEST(sh_openset, widen)
 		EXPECT_EQ(*it, i);
 	}
 }
-TEST(sh_openset, widen_throw)
+TEST_F(sh_openset, widen_throw)
 {
 	bool can_allocate = true;
 	openset<int, thousands_hash<int>, std::equal_to<int>, unreliable_allocator<std::pair<int, int>>> x(1024, unreliable_allocator<std::pair<int, int>>(can_allocate));
@@ -1546,9 +1604,9 @@ TEST(sh_openset, widen_throw)
 	}
 #endif
 }
-TEST(sh_openset, widen_and_continue_emplace)
+TEST_F(sh_openset, widen_and_continue_emplace)
 {
-	openset<int, thousands_hash<int>> x(1024);
+	counted_openset<int, thousands_hash<int>> x(1024);
 
 	// Starts inserting in bucket 632.
 	for (int i = 1000; i < 1254; ++i)
@@ -1605,21 +1663,21 @@ TEST(sh_openset, widen_and_continue_emplace)
 		EXPECT_EQ(*it, i);
 	}
 }
-TEST(sh_openset, ctor_default_zero_allocation)
+TEST_F(sh_openset, ctor_default_zero_allocation)
 {
-	general_allocations::reset();
-	ASSERT_EQ(general_allocations::m_current, 0u);
+	general_allocations::get().reset();
+	ASSERT_EQ(general_allocations::get().m_current, 0u);
 	openset<int, std::hash<int>, std::equal_to<int>, counted_allocator<int>> x;
-	EXPECT_EQ(general_allocations::m_current, 0u);
+	EXPECT_EQ(general_allocations::get().m_current, 0u);
 }
-TEST(sh_openset, ctor_empty_zero_allocation)
+TEST_F(sh_openset, ctor_empty_zero_allocation)
 {
-	general_allocations::reset();
-	ASSERT_EQ(general_allocations::m_current, 0u);
+	general_allocations::get().reset();
+	ASSERT_EQ(general_allocations::get().m_current, 0u);
 	openset<int, std::hash<int>, std::equal_to<int>, counted_allocator<int>> x(0);
-	EXPECT_EQ(general_allocations::m_current, 0u);
+	EXPECT_EQ(general_allocations::get().m_current, 0u);
 }
-TEST(sh_openset, ctor_dtor_test)
+TEST_F(sh_openset, ctor_dtor_test)
 {
 	class RefInt final
 	{
@@ -1732,10 +1790,10 @@ TEST(sh_openset, ctor_dtor_test)
 	using value_type = sh::robinhood::mutable_key<RefInt>;
 	using narrow_info_type = sh::robinhood::info<std::uint8_t>;
 
-	general_allocations::reset();
-	ASSERT_EQ(general_allocations::m_current, 0u);
-	ASSERT_EQ(typed_allocations<value_type>::m_current, 0u);
-	ASSERT_EQ(typed_allocations<narrow_info_type>::m_current, 0u);
+	general_allocations::get().reset();
+	ASSERT_EQ(general_allocations::get().m_current, 0u);
+	ASSERT_EQ(typed_allocations<value_type>::get().m_current, 0u);
+	ASSERT_EQ(typed_allocations<narrow_info_type>::get().m_current, 0u);
 
 	{
 		// Sized as to force rehash numerous times.
@@ -1782,23 +1840,16 @@ TEST(sh_openset, ctor_dtor_test)
 
 	EXPECT_EQ(key_copies, 0);
 	EXPECT_EQ(key_references, 0);
-	EXPECT_EQ(general_allocations::m_current, 0u);
-	EXPECT_EQ(typed_allocations<value_type>::m_current, 0u);
-	EXPECT_EQ(typed_allocations<narrow_info_type>::m_current, 0u);
+	EXPECT_EQ(general_allocations::get().m_current, 0u);
+	EXPECT_EQ(typed_allocations<value_type>::get().m_current, 0u);
+	EXPECT_EQ(typed_allocations<narrow_info_type>::get().m_current, 0u);
 
 	if constexpr (DEBUG_VERBOSE)
 	{
-		std::cerr << "general_allocations\n"
-			"\tallocate calls:   " << general_allocations::m_allocate_calls << "\n"
-			"\tdeallocate calls: " << general_allocations::m_deallocate_calls << "\n"
-			"\tpeak:             " << general_allocations::m_peak << " bytes\n";
-		std::cerr << "typed_allocations<value_type> (size " << sizeof(value_type) << ", align " << alignof(value_type) << ")\n"
-			"\tallocate calls:   " << typed_allocations<value_type>::m_allocate_calls << "\n"
-			"\tdeallocate calls: " << typed_allocations<value_type>::m_deallocate_calls << "\n"
-			"\tpeak:             " << typed_allocations<value_type>::m_peak << " (" << (sizeof(value_type) * typed_allocations<value_type>::m_peak) << " bytes)\n";
-		std::cerr << "typed_allocations<narrow_info_type> (size " << sizeof(narrow_info_type) << ", align " << alignof(narrow_info_type) << ")\n"
-			"\tallocate calls:   " << typed_allocations<narrow_info_type>::m_allocate_calls << "\n"
-			"\tdeallocate calls: " << typed_allocations<narrow_info_type>::m_deallocate_calls << "\n"
-			"\tpeak:             " << typed_allocations<narrow_info_type>::m_peak << " (" << (sizeof(narrow_info_type) * typed_allocations<narrow_info_type>::m_peak) << " bytes)\n";
+		std::cerr << "general_allocations\n\t" << general_allocations::get() << '\n';
+		std::cerr << "typed_allocations<value_type> (size " << sizeof(value_type) << ", align " << alignof(value_type) << ")\n\t"
+			<< typed_allocations<value_type>::get() << '\n';
+		std::cerr << "typed_allocations<narrow_info_type> (size " << sizeof(narrow_info_type) << ", align " << alignof(narrow_info_type) << ")\n\t"
+			<< typed_allocations<narrow_info_type>::get() << '\n';
 	}
 }

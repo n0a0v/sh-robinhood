@@ -187,6 +187,7 @@ namespace robinhood
 		 */
 		constexpr explicit operator const_key_value_pair<K,V>&() noexcept
 		{
+			static_assert(sizeof(mutable_key_value_pair) == sizeof(const_key_value_pair<K,V>));
 			return m_keyvalue;
 		}
 		/**	Cast to the internal const_key_value_pair.
@@ -194,6 +195,7 @@ namespace robinhood
 		 */
 		constexpr explicit operator const const_key_value_pair<K,V>&() const noexcept
 		{
+			static_assert(sizeof(mutable_key_value_pair) == sizeof(const_key_value_pair<K,V>));
 			return m_keyvalue;
 		}
 
@@ -568,12 +570,14 @@ constexpr auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::end(const s
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::cbegin(const size_type n) const -> const_local_iterator
 {
-	return const_cast<openmap&>(*this).begin(n);
+	const auto it = this->hashtable_type::begin(n);
+	return const_local_iterator{ it ? &static_cast<const value_type&>(*it) : nullptr };
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::cend(const size_type n) const -> const_local_iterator
 {
-	return const_cast<openmap&>(*this).end(n);
+	const auto it = this->hashtable_type::end(n);
+	return const_local_iterator{ it ? &static_cast<const value_type&>(*it) : nullptr };
 }
 
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>

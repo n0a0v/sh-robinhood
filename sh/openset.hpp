@@ -60,6 +60,7 @@ namespace robinhood
 		 */
 		constexpr explicit operator const value_type&() const noexcept
 		{
+			static_assert(sizeof(mutable_key) == sizeof(value_type));
 			return m_value;
 		}
 
@@ -391,12 +392,14 @@ constexpr auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::end(const size
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::cbegin(const size_type n) const -> const_local_iterator
 {
-	return const_cast<openset&>(*this).begin(n);
+	const auto it = this->hashtable_type::begin(n);
+	return const_local_iterator{ it ? &static_cast<const value_type&>(*it) : nullptr };
 }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 constexpr auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::cend(const size_type n) const -> const_local_iterator
 {
-	return const_cast<openset&>(*this).end(n);
+	const auto it = this->hashtable_type::end(n);
+	return const_local_iterator{ it ? &static_cast<const value_type&>(*it) : nullptr };
 }
 
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>

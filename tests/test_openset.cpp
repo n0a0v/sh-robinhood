@@ -1477,10 +1477,10 @@ TEST_F(sh_openset, equal_range)
 	}
 	{
 		const auto range = x.equal_range(2);
-		EXPECT_EQ(range.first, range.second);
+		EXPECT_NE(range.first, range.second);
 		EXPECT_NE(range.first, x.end());
 		ASSERT_NE(range.second, x.end());
-		EXPECT_EQ(*range.second, 2);
+		EXPECT_EQ(*range.first, 2);
 	}
 }
 TEST_F(sh_openset, ctor_move_use)

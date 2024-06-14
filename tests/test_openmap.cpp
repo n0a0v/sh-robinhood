@@ -1427,7 +1427,7 @@ TEST_F(sh_openmap, try_emplace_hint)
 	EXPECT_EQ(hint.first->second, "one");
 
 	{
-		const auto it = x.try_emplace_hint(hint.first, 2, "two");
+		const auto it = x.try_emplace(hint.first, 2, "two");
 		EXPECT_EQ(it->first, 2);
 		EXPECT_EQ(it->second, "two");
 	}
@@ -1438,11 +1438,11 @@ TEST_F(sh_openmap, try_emplace_hint_transparent)
 	std::uint32_t used_normally = 0, used_transparently = 0;
 	openmap<int, int, transparent_hash<int>, std::equal_to<>> x(4, transparent_hash<int>{ used_normally, used_transparently });
 
-	x.try_emplace_hint(x.end(), 1, 100);
+	x.try_emplace(x.end(), 1, 100);
 	EXPECT_GE(used_normally, 1u);
 	EXPECT_EQ(used_transparently, 0u);
 
-	x.try_emplace_hint(x.end(), static_cast<unsigned short>(2), 200);
+	x.try_emplace(x.end(), static_cast<unsigned short>(2), 200);
 	EXPECT_GE(used_transparently, 1u);
 }
 TEST_F(sh_openmap, erase)
@@ -1785,11 +1785,11 @@ TEST_F(sh_openmap, equal_range)
 	}
 	{
 		const auto range = x.equal_range(2);
-		EXPECT_EQ(range.first, range.second);
+		EXPECT_NE(range.first, range.second);
 		EXPECT_NE(range.first, x.end());
 		ASSERT_NE(range.second, x.end());
-		EXPECT_EQ(range.second->first, 2);
-		EXPECT_EQ(range.second->second, "two");
+		EXPECT_EQ(range.first->first, 2);
+		EXPECT_EQ(range.first->second, "two");
 	}
 }
 TEST_F(sh_openmap, ctor_move_use)

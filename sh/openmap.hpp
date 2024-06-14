@@ -401,10 +401,15 @@ public:
 	std::pair<iterator, bool> emplace(Args&&... args);
 	template <typename... Args>
 	iterator emplace_hint(const_iterator hint, Args&&... args);
-	template <typename KeyArg, typename... Args>
+	template <typename KeyArg, typename... Args,
+		typename = std::enable_if_t<
+			false == std::is_convertible_v<KeyArg&&, const_iterator>
+			&& false == std::is_convertible_v<KeyArg&&, iterator>
+		>
+	>
 	std::pair<iterator, bool> try_emplace(KeyArg&& key_arg, Args&&... args);
 	template <typename KeyArg, typename... Args>
-	iterator try_emplace_hint(const_iterator hint, KeyArg&& key_arg, Args&&... args);
+	iterator try_emplace(const_iterator hint, KeyArg&& key_arg, Args&&... args);
 
 	template <typename KeyArg>
 	size_type erase(KeyArg&& key_arg);
@@ -599,12 +604,12 @@ auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::insert(value_type&& v
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::insert(const_iterator hint, const value_type& value) -> iterator
 {
-	return try_emplace_hint(hint, std::move(value.first), value.second);
+	return try_emplace(hint, value.first, value.second);
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::insert(const_iterator hint, value_type&& value) -> iterator
 {
-	return try_emplace_hint(hint, std::move(value.first), std::move(value.second));
+	return try_emplace(hint, std::move(value.first), std::move(value.second));
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 template <typename InputIt>
@@ -676,7 +681,7 @@ auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::emplace_hint(const co
 	return emplace(std::forward<Args>(args)...).first;
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
-template <typename KeyArg, typename... Args>
+template <typename KeyArg, typename... Args, typename>
 auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::try_emplace(KeyArg&& key_arg, Args&&... args) -> std::pair<iterator, bool>
 {
 	auto&& key = this->hashtable_type::do_key(std::forward<KeyArg>(key_arg));
@@ -698,7 +703,7 @@ auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::try_emplace(KeyArg&& 
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 template <typename KeyArg, typename... Args>
-auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::try_emplace_hint(const const_iterator hint, KeyArg&& key_arg, Args&&... args) -> iterator
+auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::try_emplace(const const_iterator hint, KeyArg&& key_arg, Args&&... args) -> iterator
 {
 	return try_emplace(std::forward<KeyArg>(key_arg), std::forward<Args>(args)...).first;
 }
@@ -821,14 +826,14 @@ template <typename KeyArg>
 auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::equal_range(KeyArg&& key_arg) -> std::pair<iterator, iterator>
 {
 	const iterator it = find(std::forward<KeyArg>(key_arg));
-	return std::make_pair(it, it);
+	return std::make_pair(it, it == end() ? it : std::next(it));
 }
 template <typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 template <typename KeyArg>
 auto openmap<Key, T, Hash, KeyEqual, Allocator, SizeType>::equal_range(KeyArg&& key_arg) const -> std::pair<const_iterator, const_iterator>
 {
 	const const_iterator it = find(std::forward<KeyArg>(key_arg));
-	return std::make_pair(it, it);
+	return std::make_pair(it, it == end() ? it : std::next(it));
 }
 
 } // namespace sh

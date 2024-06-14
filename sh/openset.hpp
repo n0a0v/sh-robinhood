@@ -550,14 +550,14 @@ template <typename KeyArg>
 auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::equal_range(KeyArg&& key_arg) -> std::pair<iterator, iterator>
 {
 	const iterator it = find(std::forward<KeyArg>(key_arg));
-	return std::make_pair(it, it);
+	return std::make_pair(it, it == end() ? it : std::next(it));
 }
 template <typename Key, typename Hash, typename KeyEqual, typename Allocator, typename SizeType>
 template <typename KeyArg>
 auto openset<Key, Hash, KeyEqual, Allocator, SizeType>::equal_range(KeyArg&& key_arg) const -> std::pair<const_iterator, const_iterator>
 {
 	const const_iterator it = find(std::forward<KeyArg>(key_arg));
-	return std::make_pair(it, it);
+	return std::make_pair(it, it == end() ? it : std::next(it));
 }
 
 } // namespace sh

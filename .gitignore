@@ -3,4 +3,4 @@
 **.swp
 
 # CMAKE (convenience)
-build
+build*

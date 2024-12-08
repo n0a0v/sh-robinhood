@@ -4,7 +4,9 @@ This implementation requires a mostly C++17 compliant compiler and has been
 tested with:
 	* g++ 11
 	* g++ 12
+	* g++ 13
 	* clang 15
+	* clang 18
 	* MSVC 2022 (17.9.3)
 
 CMake & binaries are setup for unit testing. Only the headers in the "sh"

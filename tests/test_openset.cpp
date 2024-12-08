@@ -192,7 +192,7 @@ namespace
 		template <typename U>
 		struct rebind
 		{
-			using other = stateful_allocator<U>;
+			using other = stateful_allocator<U, Propagate>;
 		};
 
 		using propagate_on_container_copy_assignment = std::bool_constant<Propagate>;
